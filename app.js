@@ -1,6 +1,7 @@
 /* ─────────────────────────────────────────────
-   Wandr — app.js  (complete rewrite)
-   Clean invite → shared trip flow
+   Wandr — app.js
+   Flat architecture: single /trips collection, /users for profiles.
+   No duplicate docs. Invite immediately adds member to trip.
 ───────────────────────────────────────────── */
 
 const { initializeApp }              = window.firebaseApp;
@@ -25,12 +26,12 @@ const fbApp = initializeApp(firebaseConfig);
 const auth  = getAuth(fbApp);
 const db    = getFirestore(fbApp);
 
-const { useState, useEffect, useCallback, useMemo, useRef } = React;
+const { useState, useEffect, useCallback, useMemo } = React;
 
 /* ─────────────────────────────────────────────
    Constants
 ───────────────────────────────────────────── */
-const uid = () => Math.random().toString(36).slice(2, 9);
+const genId = () => Math.random().toString(36).slice(2, 9);
 
 const TRIP_TYPES = [
   { value: 'road',     label: '🚗 Road Trip',  cls: 'type-road'     },
@@ -68,35 +69,43 @@ const PERIODS = [
 const THEMES = [
   { id: 'dark',   label: 'Dark',     swatch: ['#0f1117','#6c7ff2'] },
   { id: 'light',  label: 'Light',    swatch: ['#f4f5f7','#4f63e8'] },
-  { id: 'blue',   label: 'Midnight', swatch: ['#00277c','#38bdf8'] },
-  { id: 'red',    label: 'Crimson',  swatch: ['#a60000','#f87171'] },
-  { id: 'pink',   label: 'Rose',     swatch: ['#b90075','#f472b6'] },
-  { id: 'green',  label: 'Forest',   swatch: ['#00601b','#4ade80'] },
-  { id: 'sunset', label: 'Sunset',   swatch: ['#e26301','#f59e0b'] },
-  { id: 'purple', label: 'Violet',   swatch: ['#6600ff','#a78bfa'] },
-  { id: 'sand',   label: 'Sand',     swatch: ['#ffdfab','#b45309'] },
+  { id: 'blue',   label: 'Midnight', swatch: ['#070d1a','#38bdf8'] },
+  { id: 'red',    label: 'Crimson',  swatch: ['#120a0a','#f87171'] },
+  { id: 'pink',   label: 'Rose',     swatch: ['#13080f','#f472b6'] },
+  { id: 'green',  label: 'Forest',   swatch: ['#080f0a','#4ade80'] },
+  { id: 'sunset', label: 'Sunset',   swatch: ['#110c04','#f59e0b'] },
+  { id: 'purple', label: 'Violet',   swatch: ['#0c0812','#a78bfa'] },
+  { id: 'sand',   label: 'Sand',     swatch: ['#f5f0e8','#b45309'] },
 ];
 
 const catInfo      = (val) => CATEGORIES.find(c => c.value === val)  || CATEGORIES[4];
 const tripTypeInfo = (val) => TRIP_TYPES.find(t => t.value === val)  || TRIP_TYPES[3];
 
 /* ─────────────────────────────────────────────
-   Firestore helpers
-   
-   ARCHITECTURE:
-   /users/{uid}/trips/{tripId}       — owner's private trips
-   /sharedTrips/{tripId}             — collaborative copy (created on first invite)
-   /invites/{tripId}_{safeEmail}     — one doc per pending invite
-   /userProfiles/{uid}               — email → uid lookup
-───────────────────────────────────────────── */
-const tripsCol     = (uid)          => collection(db, 'users', uid, 'trips');
-const tripRef      = (uid, tripId)  => doc(db, 'users', uid, 'trips', tripId);
-const sharedRef    = (tripId)       => doc(db, 'sharedTrips', tripId);
-const inviteRef    = (tripId, email)=> doc(db, 'invites', `${tripId}_${email.replace(/[@.]/g, '_')}`);
-const profileRef   = (uid)          => doc(db, 'userProfiles', uid);
+   Firestore refs
 
-const upsertProfile = (user) =>
-  setDoc(profileRef(user.uid), {
+   ARCHITECTURE (flat, no duplicates):
+   /trips/{tripId}   — single source of truth
+     ownerId:      string
+     ownerEmail:   string
+     ownerName:    string
+     memberIds:    string[]   ← uids of non-owner members
+     memberEmails: string[]   ← emails of non-owner members (denorm for display)
+     memberNames:  string[]   ← display names (denorm for display)
+     name, type, startDate, endDate, notes
+     events: [...]
+     collections: {...}
+     customCollections: [...]
+
+   /users/{uid}   — profile, used for email → uid lookup on invite
+     uid, email, displayName, photoURL
+───────────────────────────────────────────── */
+const tripsCol  = ()       => collection(db, 'trips');
+const tripDocRef = (id)    => doc(db, 'trips', id);
+const userDocRef = (uid)   => doc(db, 'users', uid);
+
+const upsertUserProfile = (user) =>
+  setDoc(userDocRef(user.uid), {
     uid:         user.uid,
     email:       user.email.toLowerCase(),
     displayName: user.displayName || '',
@@ -154,9 +163,9 @@ const Icon = ({ name, size = 16 }) => {
     logout:      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>,
     share:       <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>,
     users:       <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
-    bell:        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>,
     star:        <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="1.5"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>,
     starOutline: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>,
+    leave:       <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>,
   };
   return icons[name] || null;
 };
@@ -282,129 +291,89 @@ const ThemePicker = ({ theme, setTheme, onClose }) => (
 
 /* ─────────────────────────────────────────────
    Share Trip Modal
-   
+
    FLOW:
    1. Owner enters email
-   2. sharedTrips doc created/updated (owner in memberUids, invitee NOT yet)
-   3. Invite doc created at /invites/{tripId}_{safeEmail}
-   4. Private trip updated with pendingInvites list (for display)
-   
+   2. Look up uid in /users by email
+   3. updateDoc: arrayUnion uid into memberIds, email into memberEmails, name into memberNames
+   4. Invited user instantly sees trip in their dashboard
+
    REVOKE:
-   1. Invite doc deleted
-   2. Invitee removed from sharedTrips.memberUids (if they had accepted)
-   3. If sharedTrips has no non-owner members and no pending invites → could clean up,
-      but we keep the doc for simplicity (owner stays in memberUids)
+   1. Owner clicks Remove next to a member
+   2. updateDoc: arrayRemove uid from memberIds, email from memberEmails, name from memberNames
 ───────────────────────────────────────────── */
 const ShareTripModal = ({ trip, currentUser, onClose, showToast }) => {
   const [email,    setEmail]    = useState('');
   const [sending,  setSending]  = useState(false);
-  const [revoking, setRevoking] = useState(null); // email being revoked
+  const [revoking, setRevoking] = useState(null);
 
-  // Show all invited emails (pending + accepted) from the sharedTrip's invitedEmails list
-  const pendingInvites  = trip.pendingInvites  || [];   // emails with pending invites
-  const acceptedMembers = (trip.memberEmails   || []).filter(e => e !== currentUser.email.toLowerCase());
+  const memberIds    = trip.memberIds    || [];
+  const memberEmails = trip.memberEmails || [];
+  const memberNames  = trip.memberNames  || [];
+
+  // Build member list for display (parallel arrays)
+  const members = memberEmails.map((e, i) => ({
+    email: e,
+    name:  memberNames[i] || e,
+    uid:   memberIds[i]   || null,
+  }));
 
   const handleInvite = async () => {
     const e = email.trim().toLowerCase();
     if (!e.includes('@')) return;
-    if (e === currentUser.email.toLowerCase()) { showToast("That's your own email", 'error'); return; }
-    if (pendingInvites.includes(e))  { showToast('Already invited', 'error'); return; }
-    if (acceptedMembers.includes(e)) { showToast('Already a member', 'error'); return; }
+    if (e === currentUser.email.toLowerCase()) {
+      showToast("That's your own email", 'error'); return;
+    }
+    if (memberEmails.includes(e)) {
+      showToast('Already a member', 'error'); return;
+    }
+
     setSending(true);
     try {
-      // 1. Create/update sharedTrips doc — owner is member, invitee not yet
-      const { _own, _shared, id: tripId, ...tripData } = trip;
-      await setDoc(sharedRef(trip.id), {
-        ...tripData,
-        ownerId:        currentUser.uid,
-        ownerEmail:     currentUser.email.toLowerCase(),
-        // memberUids/memberEmails only contains ACCEPTED members + owner
-        memberUids:     arrayUnion(currentUser.uid),
-        memberEmails:   arrayUnion(currentUser.email.toLowerCase()),
-        // pendingInvites tracks emails that have been invited but not yet accepted
-        pendingInvites: arrayUnion(e),
-        updatedAt:      serverTimestamp(),
-      }, { merge: true });
+      // Look up the user by email
+      const q = query(collection(db, 'users'), where('email', '==', e));
+      const snap = await getDocs(q);
 
-      // 2. Create invite doc
-      await setDoc(inviteRef(trip.id, e), {
-        tripId:      trip.id,
-        tripName:    trip.name,
-        ownerUid:    currentUser.uid,
-        ownerEmail:  currentUser.email.toLowerCase(),
-        ownerName:   currentUser.displayName || currentUser.email,
-        inviteeEmail:e,
-        status:      'pending',
-        createdAt:   serverTimestamp(),
-      });
+      if (snap.empty) {
+        showToast('No Wandr account found for that email', 'error');
+        setSending(false); return;
+      }
 
-      // 3. Mirror pendingInvites on the private trip doc so ShareModal stays in sync
-      await updateDoc(tripRef(currentUser.uid, trip.id), {
-        pendingInvites: arrayUnion(e),
+      const profile = snap.docs[0].data();
+
+      // Add directly to trip's member arrays
+      await updateDoc(tripDocRef(trip.id), {
+        memberIds:    arrayUnion(profile.uid),
+        memberEmails: arrayUnion(e),
+        memberNames:  arrayUnion(profile.displayName || e),
+        updatedAt:    serverTimestamp(),
       });
 
       setEmail('');
-      showToast(`Invite sent to ${e}`, 'success');
+      showToast(`${profile.displayName || e} added to trip`, 'success');
     } catch (err) {
       console.error('Invite error:', err);
-      showToast('Failed to send invite. Check console.', 'error');
+      showToast('Failed to add member', 'error');
     }
     setSending(false);
   };
 
-  const handleRevoke = async (memberEmail) => {
-    setRevoking(memberEmail);
+  const handleRevoke = async (member) => {
+    setRevoking(member.email);
     try {
-      // 1. Delete the invite doc (whether pending or already accepted)
-      await deleteDoc(inviteRef(trip.id, memberEmail));
-
-      // 2. Remove from sharedTrips: remove from memberUids/memberEmails AND pendingInvites
-      //    We need their uid to remove from memberUids — query userProfiles
-      const q = query(collection(db, 'userProfiles'), where('email', '==', memberEmail));
-      const snap = await getDocs(q);
-      const memberUid = snap.empty ? null : snap.docs[0].id;
-
-      const sharedUpdate = {
-        pendingInvites: arrayRemove(memberEmail),
-        memberEmails:   arrayRemove(memberEmail),
-        updatedAt:      serverTimestamp(),
-      };
-      if (memberUid) sharedUpdate.memberUids = arrayRemove(memberUid);
-      await updateDoc(sharedRef(trip.id), sharedUpdate);
-
-      // 3. Update private trip
-      await updateDoc(tripRef(currentUser.uid, trip.id), {
-        pendingInvites: arrayRemove(memberEmail),
+      await updateDoc(tripDocRef(trip.id), {
+        memberIds:    member.uid   ? arrayRemove(member.uid)   : trip.memberIds,
+        memberEmails: arrayRemove(member.email),
+        memberNames:  arrayRemove(member.name),
+        updatedAt:    serverTimestamp(),
       });
-
-      showToast('Access removed', 'success');
+      showToast(`${member.name || member.email} removed`, 'success');
     } catch (err) {
       console.error('Revoke error:', err);
-      showToast('Failed to remove access', 'error');
+      showToast('Failed to remove member', 'error');
     }
     setRevoking(null);
   };
-
-  const Row = ({ emailAddr, label }) => (
-    <div style={{
-      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-      padding: '8px 12px', background: 'var(--surface2)',
-      borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)',
-    }}>
-      <div>
-        <span style={{ fontSize: 13, color: 'var(--ink2)' }}>{emailAddr}</span>
-        <span style={{ marginLeft: 8, fontSize: 11, color: 'var(--ink3)' }}>{label}</span>
-      </div>
-      <button
-        className="btn btn-ghost btn-sm"
-        style={{ color: 'var(--rose)', borderColor: 'var(--rose)', opacity: revoking === emailAddr ? 0.5 : 0.8 }}
-        onClick={() => handleRevoke(emailAddr)}
-        disabled={revoking === emailAddr}
-      >
-        {revoking === emailAddr ? '…' : 'Remove'}
-      </button>
-    </div>
-  );
 
   return (
     <Modal title={`Share "${trip.name}"`} onClose={onClose} size={460}
@@ -422,112 +391,219 @@ const ShareTripModal = ({ trip, currentUser, onClose, showToast }) => {
             autoFocus
           />
           <button className="btn btn-primary" onClick={handleInvite} disabled={sending || !email.trim()}>
-            {sending ? '…' : 'Invite'}
+            {sending ? '…' : 'Add'}
           </button>
         </div>
         <p style={{ fontSize: 11, color: 'var(--ink3)', marginTop: 6 }}>
-          They'll see a pending invite when they sign in. They must accept to join.
+          They must have a Wandr account. They'll see this trip immediately.
         </p>
       </div>
 
-      {(pendingInvites.length > 0 || acceptedMembers.length > 0) && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink3)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 6 }}>
-            People with access
+      {members.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink3)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 4 }}>
+            Members ({members.length})
           </div>
-          {acceptedMembers.map(m => <Row key={m} emailAddr={m} label="✓ joined" />)}
-          {pendingInvites.map(m => <Row key={m} emailAddr={m} label="⏳ pending" />)}
+          {members.map(m => (
+            <div key={m.email} style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '8px 12px', background: 'var(--surface2)',
+              borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)',
+            }}>
+              <div>
+                <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink)' }}>{m.name}</span>
+                <span style={{ marginLeft: 8, fontSize: 11, color: 'var(--ink3)' }}>{m.email}</span>
+              </div>
+              <button
+                className="btn btn-ghost btn-sm"
+                style={{ color: 'var(--rose)', borderColor: 'var(--rose)', opacity: revoking === m.email ? 0.5 : 0.8 }}
+                onClick={() => handleRevoke(m)}
+                disabled={!!revoking}
+              >
+                {revoking === m.email ? '…' : 'Remove'}
+              </button>
+            </div>
+          ))}
         </div>
+      )}
+
+      {members.length === 0 && (
+        <p style={{ fontSize: 13, color: 'var(--ink3)', marginTop: 8 }}>No members yet. Add someone above.</p>
       )}
     </Modal>
   );
 };
 
 /* ─────────────────────────────────────────────
-   Pending Invites Banner
+   Members Panel (inside TripView, visible to all)
+   Shows member list. Members can leave; owner sees Remove buttons instead.
 ───────────────────────────────────────────── */
-const InvitesBanner = ({ invites, onAccept, onDecline }) => {
-  if (!invites.length) return null;
+const MembersPanel = ({ trip, currentUser, showToast }) => {
+  const [confirm, setConfirm] = useState(null); // { uid, email, name }
+  const isOwner = trip.ownerId === currentUser.uid;
+
+  const memberIds    = trip.memberIds    || [];
+  const memberEmails = trip.memberEmails || [];
+  const memberNames  = trip.memberNames  || [];
+
+  const members = memberEmails.map((e, i) => ({
+    email: e,
+    name:  memberNames[i] || e,
+    uid:   memberIds[i]   || null,
+  }));
+
+  const handleLeave = async () => {
+    try {
+      const me = members.find(m => m.uid === currentUser.uid);
+      if (!me) return;
+      await updateDoc(tripDocRef(trip.id), {
+        memberIds:    arrayRemove(currentUser.uid),
+        memberEmails: arrayRemove(currentUser.email.toLowerCase()),
+        memberNames:  arrayRemove(me.name),
+        updatedAt:    serverTimestamp(),
+      });
+      showToast('You left the trip', 'success');
+    } catch (err) {
+      console.error(err);
+      showToast('Failed to leave trip', 'error');
+    }
+  };
+
+  const handleRemove = async (member) => {
+    try {
+      await updateDoc(tripDocRef(trip.id), {
+        memberIds:    member.uid ? arrayRemove(member.uid) : trip.memberIds,
+        memberEmails: arrayRemove(member.email),
+        memberNames:  arrayRemove(member.name),
+        updatedAt:    serverTimestamp(),
+      });
+      showToast(`${member.name} removed`, 'success');
+    } catch (err) {
+      console.error(err);
+      showToast('Failed to remove member', 'error');
+    }
+  };
+
+  const isMeSelf = (m) => m.uid === currentUser.uid;
+
   return (
-    <div style={{ marginBottom: 28 }}>
+    <div style={{ marginTop: 24 }}>
       <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink3)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
-        <Icon name="bell" size={13} /> Pending Invites ({invites.length})
+        <Icon name="users" size={13} /> Trip Members
       </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {invites.map(inv => (
-          <div key={inv.id} style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12,
-            padding: '14px 18px', background: 'var(--surface)',
-            border: '1px solid var(--accent)', borderRadius: 'var(--radius)',
-          }}>
-            <div>
-              <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--ink)' }}>{inv.tripName}</div>
-              <div style={{ fontSize: 12, color: 'var(--ink3)', marginTop: 3 }}>
-                Invited by {inv.ownerName || inv.ownerEmail}
-              </div>
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button className="btn btn-ghost btn-sm" style={{ color: 'var(--rose)', borderColor: 'var(--rose)' }} onClick={() => onDecline(inv)}>
-                Decline
-              </button>
-              <button className="btn btn-primary btn-sm" onClick={() => onAccept(inv)}>
-                Accept
-              </button>
-            </div>
+
+      {/* Owner row */}
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '10px 14px', background: 'var(--surface2)',
+        borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', marginBottom: 6,
+      }}>
+        <div>
+          <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink)' }}>{trip.ownerName || trip.ownerEmail}</span>
+          <span style={{ marginLeft: 8, fontSize: 11, color: 'var(--ink3)' }}>{trip.ownerEmail}</span>
+        </div>
+        <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--accent)', background: 'var(--accent-soft)', padding: '2px 8px', borderRadius: 99 }}>Owner</span>
+      </div>
+
+      {/* Member rows */}
+      {members.map(m => (
+        <div key={m.email} style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '10px 14px', background: 'var(--surface2)',
+          borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', marginBottom: 6,
+        }}>
+          <div>
+            <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ink)' }}>{m.name}</span>
+            <span style={{ marginLeft: 8, fontSize: 11, color: 'var(--ink3)' }}>{m.email}</span>
           </div>
-        ))}
-      </div>
+          {isOwner && (
+            <button
+              className="btn btn-ghost btn-sm"
+              style={{ color: 'var(--rose)', borderColor: 'var(--rose)' }}
+              onClick={() => setConfirm(m)}
+            >
+              Remove
+            </button>
+          )}
+          {!isOwner && isMeSelf(m) && (
+            <button
+              className="btn btn-ghost btn-sm"
+              style={{ color: 'var(--rose)', borderColor: 'var(--rose)' }}
+              onClick={() => setConfirm({ ...m, leaving: true })}
+            >
+              Leave
+            </button>
+          )}
+        </div>
+      ))}
+
+      {members.length === 0 && (
+        <p style={{ fontSize: 13, color: 'var(--ink3)', padding: '4px 0' }}>No collaborators yet.</p>
+      )}
+
+      {confirm && (
+        <ConfirmModal
+          message={confirm.leaving
+            ? `Leave "${trip.name}"? You'll lose access.`
+            : `Remove ${confirm.name} from "${trip.name}"?`}
+          confirmLabel={confirm.leaving ? 'Leave' : 'Remove'}
+          onConfirm={() => confirm.leaving ? handleLeave() : handleRemove(confirm)}
+          onClose={() => setConfirm(null)}
+        />
+      )}
     </div>
   );
 };
 
 /* ─────────────────────────────────────────────
-   useData — all Firestore listeners + mutations
+   useData — Firestore listeners + mutations
 ───────────────────────────────────────────── */
 const useData = (userId, userEmail) => {
-  const [ownTrips,    setOwnTrips]    = useState([]);
-  const [sharedTrips, setSharedTrips] = useState([]);
-  const [invites,     setInvites]     = useState([]);
-  const [loading,     setLoading]     = useState(true);
-  const [saving,      setSaving]      = useState(false);
+  const [trips,   setTrips]   = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [saving,  setSaving]  = useState(false);
 
-  /* ── Listeners ── */
-
-  // Own private trips
+  // Query trips where user is owner OR a member
   useEffect(() => {
     if (!userId) return;
-    return onSnapshot(tripsCol(userId), snap => {
-      const data = snap.docs.map(d => ({ id: d.id, ...d.data(), _own: true }));
-      data.sort((a, b) => {
+
+    // Firestore doesn't support OR across fields directly,
+    // so we run two queries and merge results.
+    let ownerTrips  = [];
+    let memberTrips = [];
+    let loaded      = { owner: false, member: false };
+
+    const merge = () => {
+      const all = [...ownerTrips];
+      memberTrips.forEach(t => { if (!all.find(x => x.id === t.id)) all.push(t); });
+      all.sort((a, b) => {
         if (a.createdAt && b.createdAt) return a.createdAt.seconds - b.createdAt.seconds;
         return (a.name || '').localeCompare(b.name || '');
       });
-      setOwnTrips(data);
-      setLoading(false);
-    });
-  }, [userId]);
+      setTrips(all);
+      if (loaded.owner && loaded.member) setLoading(false);
+    };
 
-  // Shared trips where user is an accepted member
-  useEffect(() => {
-    if (!userId) return;
-    const q = query(collection(db, 'sharedTrips'), where('memberUids', 'array-contains', userId));
-    return onSnapshot(q, snap => {
-      setSharedTrips(snap.docs.map(d => ({ id: d.id, ...d.data(), _shared: true })));
-    });
-  }, [userId]);
-
-  // Pending invites addressed to this user's email
-  useEffect(() => {
-    if (!userEmail) return;
-    const q = query(
-      collection(db, 'invites'),
-      where('inviteeEmail', '==', userEmail.toLowerCase()),
-      where('status', '==', 'pending')
+    const unsubOwner = onSnapshot(
+      query(tripsCol(), where('ownerId', '==', userId)),
+      snap => {
+        ownerTrips = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        loaded.owner = true;
+        merge();
+      }
     );
-    return onSnapshot(q, snap => {
-      setInvites(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-    });
-  }, [userEmail]);
+
+    const unsubMember = onSnapshot(
+      query(tripsCol(), where('memberIds', 'array-contains', userId)),
+      snap => {
+        memberTrips = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        loaded.member = true;
+        merge();
+      }
+    );
+
+    return () => { unsubOwner(); unsubMember(); };
+  }, [userId]);
 
   /* ── Trip mutations ── */
 
@@ -535,87 +611,54 @@ const useData = (userId, userEmail) => {
     if (!userId) return;
     setSaving(true);
     try {
-      const { id, _own, _shared, ...data } = trip;
-      if (_shared) {
-        // Write to sharedTrips (collaborative copy)
-        await setDoc(sharedRef(id), { ...data, updatedAt: serverTimestamp() }, { merge: true });
-      } else {
-        // Write to private trips
-        await setDoc(tripRef(userId, id), { ...data, updatedAt: serverTimestamp() }, { merge: true });
-        // Also keep sharedTrips in sync if this trip has been shared
-        const sSnap = await getDoc(sharedRef(id));
-        if (sSnap.exists()) {
-          await setDoc(sharedRef(id), { ...data, updatedAt: serverTimestamp() }, { merge: true });
-        }
-      }
+      const { id, ...data } = trip;
+      await setDoc(tripDocRef(id), { ...data, updatedAt: serverTimestamp() }, { merge: true });
     } finally { setSaving(false); }
   }, [userId]);
 
-  const removeTrip = useCallback(async (trip) => {
+  const createTrip = useCallback(async (tripData) => {
     if (!userId) return;
-    if (trip._shared) {
-      // Leave the shared trip (remove self from memberUids)
-      await updateDoc(sharedRef(trip.id), {
-        memberUids:   arrayRemove(userId),
-        memberEmails: arrayRemove(userEmail.toLowerCase()),
+    setSaving(true);
+    try {
+      const id = genId();
+      await setDoc(tripDocRef(id), {
+        ...tripData,
+        id,
+        ownerId:      userId,
+        ownerEmail:   userEmail.toLowerCase(),
+        ownerName:    auth.currentUser?.displayName || userEmail,
+        memberIds:    [],
+        memberEmails: [],
+        memberNames:  [],
+        createdAt:    serverTimestamp(),
         updatedAt:    serverTimestamp(),
       });
-    } else {
-      // Delete private trip
-      await deleteDoc(tripRef(userId, trip.id));
-      // If it had a sharedTrip doc and owner is deleting, delete that too
-      const sSnap = await getDoc(sharedRef(trip.id));
-      if (sSnap.exists() && sSnap.data().ownerId === userId) {
-        await deleteDoc(sharedRef(trip.id));
-      }
-    }
+      return id;
+    } finally { setSaving(false); }
   }, [userId, userEmail]);
 
-  /* ── Invite mutations ── */
+  const deleteTrip = useCallback(async (tripId) => {
+    await deleteDoc(tripDocRef(tripId));
+  }, []);
 
-  // Accept: add self to sharedTrips memberUids, delete invite, remove from pendingInvites
-  const acceptInvite = useCallback(async (invite) => {
-    if (!userId || !userEmail) return;
-    // sharedTrips doc is guaranteed to exist (created when invite was sent)
-    await updateDoc(sharedRef(invite.tripId), {
-      memberUids:     arrayUnion(userId),
-      memberEmails:   arrayUnion(userEmail.toLowerCase()),
-      pendingInvites: arrayRemove(userEmail.toLowerCase()),
-      updatedAt:      serverTimestamp(),
+  const leaveTrip = useCallback(async (trip) => {
+    const me = (trip.memberEmails || []).findIndex(e => e === userEmail.toLowerCase());
+    const myName = me >= 0 ? (trip.memberNames || [])[me] : '';
+    await updateDoc(tripDocRef(trip.id), {
+      memberIds:    arrayRemove(userId),
+      memberEmails: arrayRemove(userEmail.toLowerCase()),
+      memberNames:  myName ? arrayRemove(myName) : trip.memberNames,
+      updatedAt:    serverTimestamp(),
     });
-    await deleteDoc(doc(db, 'invites', invite.id));
-    // Sync pendingInvites on owner's private trip
-    try {
-      await updateDoc(tripRef(invite.ownerUid, invite.tripId), {
-        pendingInvites: arrayRemove(userEmail.toLowerCase()),
-      });
-    } catch { /* owner's private trip write may fail if we don't have access — acceptable */ }
   }, [userId, userEmail]);
 
-  // Decline: just delete the invite doc + remove from pendingInvites
-  const declineInvite = useCallback(async (invite) => {
-    await deleteDoc(doc(db, 'invites', invite.id));
-    // Remove from sharedTrips pendingInvites list
-    try {
-      await updateDoc(sharedRef(invite.tripId), {
-        pendingInvites: arrayRemove(userEmail.toLowerCase()),
-        updatedAt:      serverTimestamp(),
-      });
-    } catch { /* sharedTrip may not exist if owner deleted it */ }
-  }, [userEmail]);
-
-  return {
-    ownTrips, sharedTrips, invites,
-    loading, saving,
-    saveTrip, removeTrip,
-    acceptInvite, declineInvite,
-  };
+  return { trips, loading, saving, saveTrip, createTrip, deleteTrip, leaveTrip };
 };
 
 /* ─────────────────────────────────────────────
    Form Modals
 ───────────────────────────────────────────── */
-const TripFormModal = ({ trip, onSave, onClose }) => {
+const TripFormModal = ({ trip, currentUser, onCreate, onSave, onClose }) => {
   const [form, setForm] = useState({
     name:      trip?.name      || '',
     startDate: trip?.startDate || '',
@@ -625,29 +668,30 @@ const TripFormModal = ({ trip, onSave, onClose }) => {
   });
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const valid = form.name.trim() && form.startDate && form.endDate && form.endDate >= form.startDate;
+  const isEdit = !!trip?.id;
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!valid) return;
-    onSave({
-      id:               trip?.id             || uid(),
-      events:           trip?.events         || [],
-      collections:      trip?.collections    || {},
-      customCollections:trip?.customCollections || [],
-      pendingInvites:   trip?.pendingInvites  || [],
-      memberEmails:     trip?.memberEmails    || [],
-      memberUids:       trip?.memberUids      || [],
-      ...form,
-      name: form.name.trim(),
-    });
+    const payload = { ...form, name: form.name.trim() };
+    if (isEdit) {
+      await onSave({ ...trip, ...payload });
+    } else {
+      await onCreate({
+        ...payload,
+        events:           [],
+        collections:      {},
+        customCollections: [],
+      });
+    }
   };
 
   return (
-    <Modal title={trip?.id ? 'Edit Trip' : 'New Trip'} onClose={onClose}
+    <Modal title={isEdit ? 'Edit Trip' : 'New Trip'} onClose={onClose}
       footer={
         <>
           <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
           <button className="btn btn-primary" onClick={handleSave} disabled={!valid}>
-            {trip?.id ? 'Save Changes' : 'Create Trip'}
+            {isEdit ? 'Save Changes' : 'Create Trip'}
           </button>
         </>
       }
@@ -694,7 +738,7 @@ const EventFormModal = ({ event, dayIndex, onSave, onClose }) => {
   const valid = form.title.trim();
   const handleSave = () => {
     if (!valid) return;
-    onSave({ id: event?.id || uid(), dayIndex, ...form, title: form.title.trim() });
+    onSave({ id: event?.id || genId(), dayIndex, ...form, title: form.title.trim() });
   };
   return (
     <Modal title={event?.id ? 'Edit Event' : 'Add Event'} onClose={onClose}
@@ -763,7 +807,7 @@ const PlaceFormModal = ({ place, defaultCategory, customCollections, onSave, onC
   const valid = form.name.trim();
   const handleSave = () => {
     if (!valid) return;
-    onSave({ id: place?.id || uid(), ...form, name: form.name.trim() });
+    onSave({ id: place?.id || genId(), ...form, name: form.name.trim() });
   };
   return (
     <Modal title={place ? 'Edit Place' : 'Add to Collection'} onClose={onClose}
@@ -804,7 +848,7 @@ const PlaceFormModal = ({ place, defaultCategory, customCollections, onSave, onC
 
 const CustomCollectionModal = ({ onSave, onClose }) => {
   const [name, setName] = useState('');
-  const handleSave = () => { if (!name.trim()) return; onSave({ id: uid(), name: name.trim() }); };
+  const handleSave = () => { if (!name.trim()) return; onSave({ id: genId(), name: name.trim() }); };
   return (
     <Modal title="New Custom Collection" onClose={onClose}
       footer={
@@ -825,14 +869,15 @@ const CustomCollectionModal = ({ onSave, onClose }) => {
 /* ─────────────────────────────────────────────
    Dashboard
 ───────────────────────────────────────────── */
-const Dashboard = ({ ownTrips, sharedTrips, invites, currentUser, saveTrip, removeTrip, acceptInvite, declineInvite, onOpenTrip, showToast }) => {
+const Dashboard = ({ trips, currentUser, saveTrip, createTrip, deleteTrip, leaveTrip, onOpenTrip, showToast }) => {
   const [showForm,      setShowForm]      = useState(false);
   const [editTrip,      setEditTrip]      = useState(null);
-  const [confirmDelete, setConfirmDelete] = useState(null);
+  const [confirmAction, setConfirmAction] = useState(null); // { trip, action: 'delete'|'leave' }
   const [shareTrip,     setShareTrip]     = useState(null);
 
   const handleExport = () => {
-    const blob = new Blob([JSON.stringify({ trips: ownTrips }, null, 2)], { type: 'application/json' });
+    const myTrips = trips.filter(t => t.ownerId === currentUser.uid);
+    const blob = new Blob([JSON.stringify({ trips: myTrips }, null, 2)], { type: 'application/json' });
     const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'wandr-backup.json' });
     a.click();
     showToast('Backup exported', 'success');
@@ -847,7 +892,10 @@ const Dashboard = ({ ownTrips, sharedTrips, invites, currentUser, saveTrip, remo
         try {
           const data = JSON.parse(ev.target.result);
           if (!Array.isArray(data.trips)) throw new Error();
-          for (const t of data.trips) await saveTrip(t);
+          for (const t of data.trips) {
+            const { id, ownerId, ownerEmail, ownerName, memberIds, memberEmails, memberNames, createdAt, updatedAt, ...rest } = t;
+            await createTrip(rest);
+          }
           showToast('Backup imported', 'success');
         } catch { showToast('Invalid backup file', 'error'); }
       };
@@ -857,7 +905,8 @@ const Dashboard = ({ ownTrips, sharedTrips, invites, currentUser, saveTrip, remo
   };
 
   const now = new Date();
-  const categorise = list => {
+
+  const categorise = (list) => {
     const active   = list.filter(t => t.startDate && t.endDate && new Date(t.startDate+'T00:00:00') <= now && now <= new Date(t.endDate+'T00:00:00'));
     const upcoming = list.filter(t => t.startDate && new Date(t.startDate+'T00:00:00') > now);
     const past     = list.filter(t => t.endDate && new Date(t.endDate+'T00:00:00') < now && !active.includes(t));
@@ -870,44 +919,55 @@ const Dashboard = ({ ownTrips, sharedTrips, invites, currentUser, saveTrip, remo
     ];
   };
 
-  const renderTrip = trip => {
-    const ti          = tripTypeInfo(trip.type);
-    const days        = daysBetween(trip.startDate, trip.endDate);
-    const evCount     = (trip.events || []).length;
-    const placeCount  = Object.values(trip.collections || {}).reduce((s, a) => s + a.length, 0);
-    const isShared    = !!trip._shared;
-    const memberCount = ((trip.memberEmails || []).filter(e => e !== currentUser?.email?.toLowerCase())).length;
+  const myTrips     = trips.filter(t => t.ownerId === currentUser.uid);
+  const sharedWithMe = trips.filter(t => t.ownerId !== currentUser.uid);
+
+  const renderTrip = (trip) => {
+    const ti         = tripTypeInfo(trip.type);
+    const days       = daysBetween(trip.startDate, trip.endDate);
+    const evCount    = (trip.events || []).length;
+    const placeCount = Object.values(trip.collections || {}).reduce((s, a) => s + a.length, 0);
+    const isOwner    = trip.ownerId === currentUser.uid;
+    const memberCount = (trip.memberIds || []).length;
 
     return (
       <div key={trip.id} className="card trip-card" onClick={() => onOpenTrip(trip)} role="button" tabIndex={0}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
             <span className={`trip-type-badge ${ti.cls}`}>{ti.label}</span>
-            {isShared && (
+            {!isOwner && (
               <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--teal)', background: 'rgba(45,212,191,0.12)', padding: '2px 8px', borderRadius: 99, textTransform: 'uppercase' }}>
                 Shared
               </span>
             )}
           </div>
           <div style={{ display: 'flex', gap: 4 }} onClick={e => e.stopPropagation()}>
-            {!isShared && (
+            {isOwner && (
               <button className="btn-icon" title="Share" onClick={() => setShareTrip(trip)}>
                 <Icon name="share" size={13} />
               </button>
             )}
-            {!isShared && (
+            {isOwner && (
               <button className="btn-icon" title="Edit" onClick={() => { setEditTrip(trip); setShowForm(true); }}>
                 <Icon name="edit" size={13} />
               </button>
             )}
-            <button className="btn-icon" title={isShared ? 'Leave' : 'Delete'} onClick={() => setConfirmDelete(trip)}>
-              <Icon name="trash" size={13} />
+            <button
+              className="btn-icon"
+              title={isOwner ? 'Delete' : 'Leave'}
+              onClick={() => setConfirmAction({ trip, action: isOwner ? 'delete' : 'leave' })}
+            >
+              <Icon name={isOwner ? 'trash' : 'leave'} size={13} />
             </button>
           </div>
         </div>
 
         <div className="trip-card-title">{trip.name}</div>
-        {isShared && <div style={{ fontSize: 11, color: 'var(--ink3)', marginBottom: 2 }}>by {trip.ownerEmail}</div>}
+        {!isOwner && (
+          <div style={{ fontSize: 11, color: 'var(--ink3)', marginBottom: 2 }}>
+            Shared by {trip.ownerName || trip.ownerEmail}
+          </div>
+        )}
         <div className="trip-card-dates">
           {trip.startDate ? `${formatDate(trip.startDate)} → ${formatDate(trip.endDate)}` : 'No dates set'}
         </div>
@@ -916,16 +976,16 @@ const Dashboard = ({ ownTrips, sharedTrips, invites, currentUser, saveTrip, remo
           <div className="trip-meta-item"><strong>{evCount}</strong>events</div>
           <div className="trip-meta-item"><strong>{placeCount}</strong>places</div>
           {memberCount > 0 && (
-            <div className="trip-meta-item"><strong>{memberCount}</strong>{memberCount === 1 ? 'collab' : 'collabs'}</div>
+            <div className="trip-meta-item"><strong>{memberCount}</strong>{memberCount === 1 ? 'member' : 'members'}</div>
           )}
         </div>
       </div>
     );
   };
 
-  const ownGrouped    = categorise(ownTrips);
-  const sharedGrouped = categorise(sharedTrips);
-  const totalTrips    = ownTrips.length + sharedTrips.length;
+  const myGrouped     = categorise(myTrips);
+  const sharedGrouped = categorise(sharedWithMe);
+  const totalTrips    = trips.length;
 
   return (
     <div className="main">
@@ -943,18 +1003,6 @@ const Dashboard = ({ ownTrips, sharedTrips, invites, currentUser, saveTrip, remo
         </div>
       </div>
 
-      <InvitesBanner
-        invites={invites}
-        onAccept={async inv => {
-          try { await acceptInvite(inv); showToast(`Joined "${inv.tripName}"`, 'success'); }
-          catch (e) { console.error(e); showToast('Failed to accept invite', 'error'); }
-        }}
-        onDecline={async inv => {
-          await declineInvite(inv);
-          showToast('Invite declined', 'success');
-        }}
-      />
-
       {totalTrips === 0 ? (
         <div className="empty-state">
           <div className="icon">🗺️</div>
@@ -966,7 +1014,7 @@ const Dashboard = ({ ownTrips, sharedTrips, invites, currentUser, saveTrip, remo
         </div>
       ) : (
         <>
-          {ownGrouped.map(g => (
+          {myGrouped.map(g => (
             <div key={g.label} style={{ marginBottom: 28 }}>
               <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink3)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 12 }}>
                 {g.label}
@@ -975,7 +1023,7 @@ const Dashboard = ({ ownTrips, sharedTrips, invites, currentUser, saveTrip, remo
             </div>
           ))}
 
-          {sharedTrips.length > 0 && (
+          {sharedWithMe.length > 0 && (
             <div style={{ marginBottom: 28 }}>
               <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink3)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
                 <Icon name="users" size={12} /> Shared with me
@@ -995,28 +1043,39 @@ const Dashboard = ({ ownTrips, sharedTrips, invites, currentUser, saveTrip, remo
       {showForm && (
         <TripFormModal
           trip={editTrip}
-          onSave={async t => {
-            await saveTrip({ ...t, createdAt: editTrip?.createdAt || null });
-            showToast(editTrip ? 'Trip updated' : 'Trip created!', 'success');
+          currentUser={currentUser}
+          onCreate={async data => {
+            await createTrip(data);
+            showToast('Trip created!', 'success');
             setShowForm(false);
           }}
-          onClose={() => setShowForm(false)}
+          onSave={async t => {
+            await saveTrip(t);
+            showToast('Trip updated', 'success');
+            setShowForm(false);
+          }}
+          onClose={() => { setShowForm(false); setEditTrip(null); }}
         />
       )}
 
-      {confirmDelete && (
+      {confirmAction && (
         <ConfirmModal
           message={
-            confirmDelete._shared
-              ? `Leave "${confirmDelete.name}"? You'll lose access to this shared trip.`
-              : `Delete "${confirmDelete.name}" and all its data? This cannot be undone.`
+            confirmAction.action === 'leave'
+              ? `Leave "${confirmAction.trip.name}"? You'll lose access to this trip.`
+              : `Delete "${confirmAction.trip.name}" and all its data? This cannot be undone.`
           }
-          confirmLabel={confirmDelete._shared ? 'Leave' : 'Delete'}
+          confirmLabel={confirmAction.action === 'leave' ? 'Leave' : 'Delete'}
           onConfirm={async () => {
-            await removeTrip(confirmDelete);
-            showToast(confirmDelete._shared ? 'Left trip' : 'Trip deleted', 'success');
+            if (confirmAction.action === 'leave') {
+              await leaveTrip(confirmAction.trip);
+              showToast('Left trip', 'success');
+            } else {
+              await deleteTrip(confirmAction.trip.id);
+              showToast('Trip deleted', 'success');
+            }
           }}
-          onClose={() => setConfirmDelete(null)}
+          onClose={() => setConfirmAction(null)}
         />
       )}
 
@@ -1205,7 +1264,7 @@ const CollectionsView = ({ trip, saveTrip, showToast }) => {
   const handleQuickAdd = async () => {
     const text = importText.trim(); if (!text) return;
     const isLink = text.startsWith('http');
-    const place = { id: uid(), name: isLink ? 'Saved Place' : text, category: importCat, location: '', notes: '', link: isLink ? text : '', favorite: false };
+    const place = { id: genId(), name: isLink ? 'Saved Place' : text, category: importCat, location: '', notes: '', link: isLink ? text : '', favorite: false };
     await mutateCol({ ...collections, [importCat]: [...(collections[importCat] || []), place] });
     showToast('Place added', 'success'); setImportText('');
   };
@@ -1397,10 +1456,9 @@ const TripView = ({ trip, currentUser, saveTrip, showToast, onBack }) => {
 
   if (!trip) return null;
 
-  const ti          = tripTypeInfo(trip.type);
-  const isShared    = !!trip._shared;
-  const isOwner     = trip.ownerId === currentUser?.uid || !isShared;
-  const memberCount = ((trip.memberEmails || []).filter(e => e !== currentUser?.email?.toLowerCase())).length;
+  const ti      = tripTypeInfo(trip.type);
+  const isOwner = trip.ownerId === currentUser.uid;
+  const memberCount = (trip.memberIds || []).length;
 
   return (
     <div className="main">
@@ -1410,14 +1468,14 @@ const TripView = ({ trip, currentUser, saveTrip, showToast, onBack }) => {
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
             <span className={`trip-type-badge ${ti.cls}`}>{ti.label}</span>
-            {isShared && (
+            {!isOwner && (
               <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--teal)', background: 'rgba(45,212,191,0.12)', padding: '2px 8px', borderRadius: 99, textTransform: 'uppercase' }}>
-                Shared by {trip.ownerEmail}
+                Shared by {trip.ownerName || trip.ownerEmail}
               </span>
             )}
-            {!isShared && memberCount > 0 && (
+            {isOwner && memberCount > 0 && (
               <span style={{ fontSize: 11, color: 'var(--ink3)', display: 'flex', alignItems: 'center', gap: 4 }}>
-                <Icon name="users" size={12} /> {memberCount} collaborator{memberCount > 1 ? 's' : ''}
+                <Icon name="users" size={12} /> {memberCount} member{memberCount > 1 ? 's' : ''}
               </span>
             )}
           </div>
@@ -1430,7 +1488,7 @@ const TripView = ({ trip, currentUser, saveTrip, showToast, onBack }) => {
           {trip.notes && <p style={{ marginTop: 6, fontSize: 13, color: 'var(--ink3)' }}>{trip.notes}</p>}
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
-          {isOwner && !isShared && (
+          {isOwner && (
             <button className="btn btn-ghost btn-sm" onClick={() => setShowShare(true)}>
               <Icon name="share" size={13} /> Share
             </button>
@@ -1444,16 +1502,21 @@ const TripView = ({ trip, currentUser, saveTrip, showToast, onBack }) => {
       </div>
 
       <div className="view-tabs">
-        <button className={`view-tab ${tab === 'itinerary' ? 'active' : ''}`} onClick={() => setTab('itinerary')}>📅 Itinerary</button>
+        <button className={`view-tab ${tab === 'itinerary' ? 'active' : ''}`}   onClick={() => setTab('itinerary')}>📅 Itinerary</button>
         <button className={`view-tab ${tab === 'collections' ? 'active' : ''}`} onClick={() => setTab('collections')}>📌 Collections</button>
+        <button className={`view-tab ${tab === 'members' ? 'active' : ''}`}     onClick={() => setTab('members')}>
+          👥 Members {(memberCount + 1) > 1 && <span style={{ fontSize: 11, opacity: 0.7 }}>({memberCount + 1})</span>}
+        </button>
       </div>
 
       {tab === 'itinerary'   && <ItineraryView   trip={trip} saveTrip={saveTrip} showToast={showToast} />}
       {tab === 'collections' && <CollectionsView trip={trip} saveTrip={saveTrip} showToast={showToast} />}
+      {tab === 'members'     && <MembersPanel    trip={trip} currentUser={currentUser} showToast={showToast} />}
 
       {showEditTrip && (
         <TripFormModal
           trip={trip}
+          currentUser={currentUser}
           onSave={async t => { await saveTrip(t); showToast('Trip updated', 'success'); setShowEditTrip(false); }}
           onClose={() => setShowEditTrip(false)}
         />
@@ -1474,7 +1537,7 @@ const TripView = ({ trip, currentUser, saveTrip, showToast, onBack }) => {
    App Root
 ───────────────────────────────────────────── */
 const App = () => {
-  const [authUser,        setAuthUser]        = useState(undefined); // undefined = loading
+  const [authUser,        setAuthUser]        = useState(undefined);
   const [activeTrip,      setActiveTrip]      = useState(null);
   const [toast,           setToast]           = useState(null);
   const [showThemePicker, setShowThemePicker] = useState(false);
@@ -1485,7 +1548,7 @@ const App = () => {
   useEffect(() => {
     return onAuthStateChanged(auth, async user => {
       if (user) {
-        await upsertProfile(user);
+        await upsertUserProfile(user);
         setAuthUser(user);
       } else {
         setAuthUser(null);
@@ -1493,18 +1556,17 @@ const App = () => {
     });
   }, []);
 
-  const { ownTrips, sharedTrips, invites, loading, saving, saveTrip, removeTrip, acceptInvite, declineInvite } =
+  const { trips, loading, saving, saveTrip, createTrip, deleteTrip, leaveTrip } =
     useData(authUser?.uid, authUser?.email);
 
   // Keep activeTrip in sync with live Firestore data
   const liveTrip = useMemo(() => {
     if (!activeTrip) return null;
-    return [...ownTrips, ...sharedTrips].find(t => t.id === activeTrip.id) ?? null;
-  }, [activeTrip, ownTrips, sharedTrips]);
+    return trips.find(t => t.id === activeTrip.id) ?? null;
+  }, [activeTrip, trips]);
 
   const handleLogout = async () => { await signOut(auth); setActiveTrip(null); };
 
-  // Initial load screen
   if (authUser === undefined) return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
       <nav className="nav"><div className="nav-brand">Wandr<span className="dot">.</span></div></nav>
@@ -1534,11 +1596,6 @@ const App = () => {
               <div className="saving-dot" /><span>Saving…</span>
             </div>
           )}
-          {invites.length > 0 && !liveTrip && (
-            <div style={{ fontSize: 11, fontWeight: 600, background: 'var(--accent)', color: '#fff', borderRadius: 99, padding: '2px 8px', display: 'flex', alignItems: 'center', gap: 4 }}>
-              <Icon name="bell" size={11} /> {invites.length}
-            </div>
-          )}
           <button className="btn-icon" onClick={() => setShowThemePicker(true)} title="Theme" style={{ fontSize: 15 }}>🎨</button>
           {authUser && (
             <>
@@ -1564,14 +1621,12 @@ const App = () => {
         />
       ) : (
         <Dashboard
-          ownTrips={ownTrips}
-          sharedTrips={sharedTrips}
-          invites={invites}
+          trips={trips}
           currentUser={authUser}
           saveTrip={saveTrip}
-          removeTrip={removeTrip}
-          acceptInvite={acceptInvite}
-          declineInvite={declineInvite}
+          createTrip={createTrip}
+          deleteTrip={deleteTrip}
+          leaveTrip={leaveTrip}
           onOpenTrip={setActiveTrip}
           showToast={showToast}
         />
