@@ -1,6 +1,6 @@
 /* ─────────────────────────────────────────────
-   Wandr — app.js
-   Firebase Auth (Google) + Firestore + Sharing
+   Wandr — app.js  (complete rewrite)
+   Clean invite → shared trip flow
 ───────────────────────────────────────────── */
 
 const { initializeApp }              = window.firebaseApp;
@@ -20,43 +20,17 @@ const firebaseConfig = {
   appId:             "1:121115293183:web:0ecd47bae79cc1a3ebe3ca",
   measurementId:     "G-YBNVB04ZFQ"
 };
+
 const fbApp = initializeApp(firebaseConfig);
 const auth  = getAuth(fbApp);
 const db    = getFirestore(fbApp);
 
-const { useState, useEffect, useCallback, useMemo } = React;
+const { useState, useEffect, useCallback, useMemo, useRef } = React;
 
 /* ─────────────────────────────────────────────
-   Helpers
+   Constants
 ───────────────────────────────────────────── */
 const uid = () => Math.random().toString(36).slice(2, 9);
-
-const formatDate = (iso) => {
-  if (!iso) return '';
-  const d = new Date(iso + 'T00:00:00');
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-};
-
-const daysBetween = (start, end) => {
-  if (!start || !end) return 0;
-  const s = new Date(start + 'T00:00:00'), e = new Date(end + 'T00:00:00');
-  return Math.max(0, Math.round((e - s) / 86400000) + 1);
-};
-
-const getDayLabel = (startDate, dayIndex) => {
-  if (!startDate) return `Day ${dayIndex + 1}`;
-  const d = new Date(startDate + 'T00:00:00');
-  d.setDate(d.getDate() + dayIndex);
-  return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-};
-
-// Helper to get user ID by email
-const getUserIdByEmail = async (email) => {
-  const q = query(collection(db, 'userProfiles'), where('email', '==', email.toLowerCase()));
-  const snap = await getDocs(q);
-  if (snap.empty) return null;
-  return snap.docs[0].id;
-};
 
 const TRIP_TYPES = [
   { value: 'road',     label: '🚗 Road Trip',  cls: 'type-road'     },
@@ -91,67 +65,75 @@ const PERIODS = [
   { id: 'evening',   label: 'Evening',   range: '6pm – late' },
 ];
 
-const catInfo      = (val) => CATEGORIES.find(c => c.value === val) || CATEGORIES[3];
-const tripTypeInfo = (val) => TRIP_TYPES.find(t => t.value === val) || TRIP_TYPES[3];
-
-/* ─────────────────────────────────────────────
-   Themes
-───────────────────────────────────────────── */
 const THEMES = [
-  { id: 'dark',   label: 'Dark',    swatch: ['#0f1117','#6c7ff2'] },
-  { id: 'light',  label: 'Light',   swatch: ['#f4f5f7','#4f63e8'] },
-  { id: 'blue',   label: 'Midnight',swatch: ['#070d1a','#38bdf8'] },
-  { id: 'red',    label: 'Crimson', swatch: ['#120a0a','#f87171'] },
-  { id: 'pink',   label: 'Rose',    swatch: ['#13080f','#f472b6'] },
-  { id: 'green',  label: 'Forest',  swatch: ['#080f0a','#4ade80'] },
-  { id: 'sunset', label: 'Sunset',  swatch: ['#110c04','#f59e0b'] },
-  { id: 'purple', label: 'Violet',  swatch: ['#0c0812','#a78bfa'] },
-  { id: 'sand',   label: 'Sand',    swatch: ['#f5f0e8','#b45309'] },
+  { id: 'dark',   label: 'Dark',     swatch: ['#0f1117','#6c7ff2'] },
+  { id: 'light',  label: 'Light',    swatch: ['#f4f5f7','#4f63e8'] },
+  { id: 'blue',   label: 'Midnight', swatch: ['#070d1a','#38bdf8'] },
+  { id: 'red',    label: 'Crimson',  swatch: ['#120a0a','#f87171'] },
+  { id: 'pink',   label: 'Rose',     swatch: ['#13080f','#f472b6'] },
+  { id: 'green',  label: 'Forest',   swatch: ['#080f0a','#4ade80'] },
+  { id: 'sunset', label: 'Sunset',   swatch: ['#110c04','#f59e0b'] },
+  { id: 'purple', label: 'Violet',   swatch: ['#0c0812','#a78bfa'] },
+  { id: 'sand',   label: 'Sand',     swatch: ['#f5f0e8','#b45309'] },
 ];
 
+const catInfo      = (val) => CATEGORIES.find(c => c.value === val)  || CATEGORIES[4];
+const tripTypeInfo = (val) => TRIP_TYPES.find(t => t.value === val)  || TRIP_TYPES[3];
+
+/* ─────────────────────────────────────────────
+   Firestore helpers
+   
+   ARCHITECTURE:
+   /users/{uid}/trips/{tripId}       — owner's private trips
+   /sharedTrips/{tripId}             — collaborative copy (created on first invite)
+   /invites/{tripId}_{safeEmail}     — one doc per pending invite
+   /userProfiles/{uid}               — email → uid lookup
+───────────────────────────────────────────── */
+const tripsCol     = (uid)          => collection(db, 'users', uid, 'trips');
+const tripRef      = (uid, tripId)  => doc(db, 'users', uid, 'trips', tripId);
+const sharedRef    = (tripId)       => doc(db, 'sharedTrips', tripId);
+const inviteRef    = (tripId, email)=> doc(db, 'invites', `${tripId}_${email.replace(/[@.]/g, '_')}`);
+const profileRef   = (uid)          => doc(db, 'userProfiles', uid);
+
+const upsertProfile = (user) =>
+  setDoc(profileRef(user.uid), {
+    uid:         user.uid,
+    email:       user.email.toLowerCase(),
+    displayName: user.displayName || '',
+    photoURL:    user.photoURL    || '',
+  }, { merge: true });
+
+/* ─────────────────────────────────────────────
+   Date helpers
+───────────────────────────────────────────── */
+const formatDate = (iso) => {
+  if (!iso) return '';
+  return new Date(iso + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+};
+
+const daysBetween = (start, end) => {
+  if (!start || !end) return 0;
+  const s = new Date(start + 'T00:00:00'), e = new Date(end + 'T00:00:00');
+  return Math.max(0, Math.round((e - s) / 86400000) + 1);
+};
+
+const getDayLabel = (startDate, idx) => {
+  if (!startDate) return `Day ${idx + 1}`;
+  const d = new Date(startDate + 'T00:00:00');
+  d.setDate(d.getDate() + idx);
+  return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+};
+
+/* ─────────────────────────────────────────────
+   Theme hook
+───────────────────────────────────────────── */
 const useTheme = () => {
-  const [theme, setThemeState] = useState(() => localStorage.getItem('wandr_theme') || 'dark');
+  const [theme, setRaw] = useState(() => localStorage.getItem('wandr_theme') || 'dark');
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('wandr_theme', theme);
   }, [theme]);
-  return { theme, setTheme: setThemeState };
-};
-
-/* ─────────────────────────────────────────────
-   Firestore refs & helpers
-───────────────────────────────────────────── */
-// Private trips: /users/{uid}/trips/{tripId}
-const tripsCol    = (userId)         => collection(db, 'users', userId, 'trips');
-const tripDocRef  = (userId, tripId) => doc(db, 'users', userId, 'trips', tripId);
-
-// Shared trips: /sharedTrips/{tripId}  (writable by owner + members)
-const sharedDocRef = (tripId) => doc(db, 'sharedTrips', tripId);
-
-// Invites: /invites/{inviteId}  keyed by email so we can query by inviteeEmail
-const invitesCol = () => collection(db, 'invites');
-
-// User profiles: /userProfiles/{uid}  — so owners can display invitee names
-const profileDocRef = (userId) => doc(db, 'userProfiles', userId);
-
-// Register/refresh profile on login
-const upsertProfile = async (user) => {
-  await setDoc(profileDocRef(user.uid), {
-    uid:         user.uid,
-    email:       user.email,
-    displayName: user.displayName || '',
-    photoURL:    user.photoURL    || '',
-  }, { merge: true });
-};
-
-// Save a trip (private or shared)
-const saveTripDoc = async (userId, trip, isShared = false) => {
-  const { id, ...data } = trip;
-  if (isShared) {
-    await setDoc(sharedDocRef(id), { ...data, updatedAt: serverTimestamp() }, { merge: true });
-  } else {
-    await setDoc(tripDocRef(userId, id), { ...data, updatedAt: serverTimestamp() }, { merge: true });
-  }
+  return { theme, setTheme: setRaw };
 };
 
 /* ─────────────────────────────────────────────
@@ -168,15 +150,13 @@ const Icon = ({ name, size = 16 }) => {
     download:    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>,
     upload:      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>,
     link:        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>,
-    suitcase:    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/><line x1="12" y1="12" x2="12" y2="16"/><line x1="10" y1="14" x2="14" y2="14"/></svg>,
     check:       <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>,
     logout:      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>,
     share:       <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>,
     users:       <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
     bell:        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>,
-    star:        <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>,
-    starOutline: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>,
-    folder:      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>,
+    star:        <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="1.5"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>,
+    starOutline: <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>,
   };
   return icons[name] || null;
 };
@@ -187,13 +167,13 @@ const Icon = ({ name, size = 16 }) => {
 const Toast = ({ toast, setToast }) => {
   useEffect(() => {
     if (!toast) return;
-    const t = setTimeout(() => setToast(null), 2800);
+    const t = setTimeout(() => setToast(null), 3000);
     return () => clearTimeout(t);
   }, [toast]);
   if (!toast) return null;
   return (
-    <div className={`toast ${toast.kind}`}>
-      {toast.kind === 'success' && <Icon name="check" size={14} />}
+    <div className={`toast ${toast.kind || 'success'}`}>
+      {(toast.kind === 'success' || !toast.kind) && <Icon name="check" size={14} />}
       {toast.msg}
     </div>
   );
@@ -202,17 +182,39 @@ const Toast = ({ toast, setToast }) => {
 /* ─────────────────────────────────────────────
    Modal
 ───────────────────────────────────────────── */
-const Modal = ({ title, onClose, footer, children, size = 500 }) => (
-  <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
-    <div className="modal" style={{ maxWidth: size }}>
-      <div className="modal-header">
-        <span className="modal-title">{title}</span>
-        <button className="btn-icon" onClick={onClose}><Icon name="x" size={15} /></button>
+const Modal = ({ title, onClose, footer, children, size = 500 }) => {
+  useEffect(() => {
+    const fn = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', fn);
+    return () => document.removeEventListener('keydown', fn);
+  }, [onClose]);
+  return (
+    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="modal" style={{ maxWidth: size }}>
+        <div className="modal-header">
+          <span className="modal-title">{title}</span>
+          <button className="btn-icon" onClick={onClose}><Icon name="x" size={15} /></button>
+        </div>
+        <div className="modal-body">{children}</div>
+        {footer && <div className="modal-footer">{footer}</div>}
       </div>
-      <div className="modal-body">{children}</div>
-      {footer && <div className="modal-footer">{footer}</div>}
     </div>
-  </div>
+  );
+};
+
+const ConfirmModal = ({ message, onConfirm, onClose, confirmLabel = 'Delete', danger = true }) => (
+  <Modal title="Confirm" onClose={onClose}
+    footer={
+      <>
+        <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+        <button className={`btn ${danger ? 'btn-danger' : 'btn-primary'}`} onClick={() => { onConfirm(); onClose(); }}>
+          {confirmLabel}
+        </button>
+      </>
+    }
+  >
+    <p style={{ color: 'var(--ink2)', fontSize: 14, lineHeight: 1.6 }}>{message}</p>
+  </Modal>
 );
 
 /* ─────────────────────────────────────────────
@@ -220,13 +222,15 @@ const Modal = ({ title, onClose, footer, children, size = 500 }) => (
 ───────────────────────────────────────────── */
 const AuthScreen = () => {
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const [error,   setError]   = useState('');
   const handleGoogle = async () => {
     setLoading(true); setError('');
     try {
-      const provider = new GoogleAuthProvider();
-      await signInWithPopup(auth, provider);
-    } catch { setError('Sign-in failed. Please try again.'); setLoading(false); }
+      await signInWithPopup(auth, new GoogleAuthProvider());
+    } catch {
+      setError('Sign-in failed. Please try again.');
+      setLoading(false);
+    }
   };
   return (
     <div className="auth-screen">
@@ -255,174 +259,184 @@ const AuthScreen = () => {
    Theme Picker
 ───────────────────────────────────────────── */
 const ThemePicker = ({ theme, setTheme, onClose }) => (
-  <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
-    <div className="modal" style={{ maxWidth: 380 }}>
-      <div className="modal-header">
-        <span className="modal-title">Choose Theme</span>
-        <button className="btn-icon" onClick={onClose}><Icon name="x" size={15} /></button>
-      </div>
-      <div className="modal-body">
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
-          {THEMES.map(t => (
-            <button key={t.id} onClick={() => { setTheme(t.id); onClose(); }} style={{
-              display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
-              padding: '12px 8px', borderRadius: 'var(--radius-sm)',
-              border: theme === t.id ? '2px solid var(--accent)' : '2px solid var(--border)',
-              background: theme === t.id ? 'var(--accent-soft)' : 'var(--surface2)',
-              cursor: 'pointer', transition: 'var(--transition)',
-            }}>
-              <div style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
-                <div style={{ width: 20, height: 20, borderRadius: 6, background: t.swatch[0], border: '1px solid rgba(255,255,255,0.08)' }} />
-                <div style={{ width: 12, height: 12, borderRadius: '50%', background: t.swatch[1] }} />
-              </div>
-              <span style={{ fontSize: 11, fontWeight: 500, color: theme === t.id ? 'var(--accent)' : 'var(--ink2)' }}>{t.label}</span>
-            </button>
-          ))}
-        </div>
-      </div>
+  <Modal title="Choose Theme" onClose={onClose} size={380}>
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
+      {THEMES.map(t => (
+        <button key={t.id} onClick={() => { setTheme(t.id); onClose(); }} style={{
+          display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
+          padding: '12px 8px', borderRadius: 'var(--radius-sm)',
+          border: theme === t.id ? '2px solid var(--accent)' : '2px solid var(--border)',
+          background: theme === t.id ? 'var(--accent-soft)' : 'var(--surface2)',
+          cursor: 'pointer', transition: 'var(--transition)',
+        }}>
+          <div style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
+            <div style={{ width: 20, height: 20, borderRadius: 6, background: t.swatch[0], border: '1px solid rgba(255,255,255,0.08)' }} />
+            <div style={{ width: 12, height: 12, borderRadius: '50%', background: t.swatch[1] }} />
+          </div>
+          <span style={{ fontSize: 11, fontWeight: 500, color: theme === t.id ? 'var(--accent)' : 'var(--ink2)' }}>{t.label}</span>
+        </button>
+      ))}
     </div>
-  </div>
+  </Modal>
 );
 
 /* ─────────────────────────────────────────────
    Share Trip Modal
-   Owner enters an email → creates invite doc
+   
+   FLOW:
+   1. Owner enters email
+   2. sharedTrips doc created/updated (owner in memberUids, invitee NOT yet)
+   3. Invite doc created at /invites/{tripId}_{safeEmail}
+   4. Private trip updated with pendingInvites list (for display)
+   
+   REVOKE:
+   1. Invite doc deleted
+   2. Invitee removed from sharedTrips.memberUids (if they had accepted)
+   3. If sharedTrips has no non-owner members and no pending invites → could clean up,
+      but we keep the doc for simplicity (owner stays in memberUids)
 ───────────────────────────────────────────── */
 const ShareTripModal = ({ trip, currentUser, onClose, showToast }) => {
-  const [email, setEmail] = useState('');
-  const [sending, setSending] = useState(false);
-  const [members, setMembers] = useState(trip.memberEmails || []);
+  const [email,    setEmail]    = useState('');
+  const [sending,  setSending]  = useState(false);
+  const [revoking, setRevoking] = useState(null); // email being revoked
 
-  const handleShare = async () => {
+  // Show all invited emails (pending + accepted) from the sharedTrip's invitedEmails list
+  const pendingInvites  = trip.pendingInvites  || [];   // emails with pending invites
+  const acceptedMembers = (trip.memberEmails   || []).filter(e => e !== currentUser.email.toLowerCase());
+
+  const handleInvite = async () => {
     const e = email.trim().toLowerCase();
-    if (!e || !e.includes('@')) return;
+    if (!e.includes('@')) return;
     if (e === currentUser.email.toLowerCase()) { showToast("That's your own email", 'error'); return; }
-    if (members.includes(e)) { showToast('Already shared with this person', 'error'); return; }
+    if (pendingInvites.includes(e))  { showToast('Already invited', 'error'); return; }
+    if (acceptedMembers.includes(e)) { showToast('Already a member', 'error'); return; }
     setSending(true);
     try {
-      // Step 1: Create/update sharedTrips doc (merge so we don't overwrite if it exists)
-      // Owner is in memberUids; invitee is NOT added until they accept
-      const { id, _own, _shared, ...tripData } = trip;
-      await setDoc(sharedDocRef(trip.id), {
+      // 1. Create/update sharedTrips doc — owner is member, invitee not yet
+      const { _own, _shared, id: tripId, ...tripData } = trip;
+      await setDoc(sharedRef(trip.id), {
         ...tripData,
-        ownerId:      currentUser.uid,
-        ownerEmail:   currentUser.email,
-        memberUids:   arrayUnion(currentUser.uid),   // merge-safe: won't duplicate
-        updatedAt:    serverTimestamp(),
+        ownerId:        currentUser.uid,
+        ownerEmail:     currentUser.email.toLowerCase(),
+        // memberUids/memberEmails only contains ACCEPTED members + owner
+        memberUids:     arrayUnion(currentUser.uid),
+        memberEmails:   arrayUnion(currentUser.email.toLowerCase()),
+        // pendingInvites tracks emails that have been invited but not yet accepted
+        pendingInvites: arrayUnion(e),
+        updatedAt:      serverTimestamp(),
       }, { merge: true });
 
-      // Step 2: Write the invite doc
-      const safeEmail = e.replace(/[@.]/g, '_');
-      const inviteId = `${trip.id}_${safeEmail}`;
-      await setDoc(doc(db, 'invites', inviteId), {
-        tripId:       trip.id,
-        tripName:     trip.name,
-        ownerUid:     currentUser.uid,
-        ownerEmail:   currentUser.email,
-        ownerName:    currentUser.displayName || currentUser.email,
-        inviteeEmail: e,
-        inviteeUid:   null,
-        status:       'pending',
-        createdAt:    serverTimestamp(),
+      // 2. Create invite doc
+      await setDoc(inviteRef(trip.id, e), {
+        tripId:      trip.id,
+        tripName:    trip.name,
+        ownerUid:    currentUser.uid,
+        ownerEmail:  currentUser.email.toLowerCase(),
+        ownerName:   currentUser.displayName || currentUser.email,
+        inviteeEmail:e,
+        status:      'pending',
+        createdAt:   serverTimestamp(),
       });
 
-      // Step 3: Track invited email on the private trip (for the Share modal list)
-      const updatedEmails = [...members, e];
-      setMembers(updatedEmails);
-      await updateDoc(tripDocRef(currentUser.uid, trip.id), {
-        memberEmails: updatedEmails,
+      // 3. Mirror pendingInvites on the private trip doc so ShareModal stays in sync
+      await updateDoc(tripRef(currentUser.uid, trip.id), {
+        pendingInvites: arrayUnion(e),
       });
 
       setEmail('');
       showToast(`Invite sent to ${e}`, 'success');
     } catch (err) {
-      console.error('Share error:', err);
-      showToast('Failed to send invite', 'error');
+      console.error('Invite error:', err);
+      showToast('Failed to send invite. Check console.', 'error');
     }
     setSending(false);
   };
 
   const handleRevoke = async (memberEmail) => {
+    setRevoking(memberEmail);
     try {
-      // Query userProfiles to find uid by email
-      const memberUid = await getUserIdByEmail(memberEmail);
-      
-      if (!memberUid) {
-        showToast('Could not find user', 'error');
-        return;
-      }
-      
-      // Remove invite document
-      const inviteId = `${trip.id}_${memberEmail.replace(/[.@]/g, '_')}`;
-      const inviteDoc = doc(db, 'invites', inviteId);
-      const inviteSnap = await getDoc(inviteDoc);
-      if (inviteSnap.exists()) {
-        await deleteDoc(inviteDoc);
-      }
-      
-      const updatedEmails = members.filter(m => m !== memberEmail);
-      setMembers(updatedEmails);
-      
-      const isShared = !!trip.ownerId;
-      if (isShared) {
-        await updateDoc(sharedDocRef(trip.id), { 
-          memberEmails: updatedEmails, 
-          memberUids: arrayRemove(memberUid)
-        });
-      } else {
-        await updateDoc(tripDocRef(currentUser.uid, trip.id), { 
-          memberEmails: updatedEmails, 
-          memberUids: arrayRemove(memberUid)
-        });
-      }
+      // 1. Delete the invite doc (whether pending or already accepted)
+      await deleteDoc(inviteRef(trip.id, memberEmail));
+
+      // 2. Remove from sharedTrips: remove from memberUids/memberEmails AND pendingInvites
+      //    We need their uid to remove from memberUids — query userProfiles
+      const q = query(collection(db, 'userProfiles'), where('email', '==', memberEmail));
+      const snap = await getDocs(q);
+      const memberUid = snap.empty ? null : snap.docs[0].id;
+
+      const sharedUpdate = {
+        pendingInvites: arrayRemove(memberEmail),
+        memberEmails:   arrayRemove(memberEmail),
+        updatedAt:      serverTimestamp(),
+      };
+      if (memberUid) sharedUpdate.memberUids = arrayRemove(memberUid);
+      await updateDoc(sharedRef(trip.id), sharedUpdate);
+
+      // 3. Update private trip
+      await updateDoc(tripRef(currentUser.uid, trip.id), {
+        pendingInvites: arrayRemove(memberEmail),
+      });
+
       showToast('Access removed', 'success');
     } catch (err) {
-      console.error('Remove access error:', err);
-      showToast('x access', 'error');
+      console.error('Revoke error:', err);
+      showToast('Failed to remove access', 'error');
     }
+    setRevoking(null);
   };
 
+  const Row = ({ emailAddr, label }) => (
+    <div style={{
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      padding: '8px 12px', background: 'var(--surface2)',
+      borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)',
+    }}>
+      <div>
+        <span style={{ fontSize: 13, color: 'var(--ink2)' }}>{emailAddr}</span>
+        <span style={{ marginLeft: 8, fontSize: 11, color: 'var(--ink3)' }}>{label}</span>
+      </div>
+      <button
+        className="btn btn-ghost btn-sm"
+        style={{ color: 'var(--rose)', borderColor: 'var(--rose)', opacity: revoking === emailAddr ? 0.5 : 0.8 }}
+        onClick={() => handleRevoke(emailAddr)}
+        disabled={revoking === emailAddr}
+      >
+        {revoking === emailAddr ? '…' : 'Remove'}
+      </button>
+    </div>
+  );
+
   return (
-    <Modal title={`Share "${trip.name}"`} onClose={onClose} size={440}
+    <Modal title={`Share "${trip.name}"`} onClose={onClose} size={460}
       footer={<button className="btn btn-ghost" onClick={onClose}>Done</button>}
     >
       <div className="field">
         <label>Invite by email</label>
         <div style={{ display: 'flex', gap: 8 }}>
           <input
-            value={email} onChange={e => setEmail(e.target.value)}
+            value={email}
+            onChange={e => setEmail(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && !sending && handleInvite()}
             placeholder="friend@email.com"
-            onKeyDown={e => e.key === 'Enter' && handleShare()}
             type="email"
+            autoFocus
           />
-          <button className="btn btn-primary" onClick={handleShare} disabled={sending || !email.trim()}>
+          <button className="btn btn-primary" onClick={handleInvite} disabled={sending || !email.trim()}>
             {sending ? '…' : 'Invite'}
           </button>
         </div>
-        <p style={{ fontSize: 11, color: 'var(--ink3)', marginTop: 4 }}>
-          They'll see a pending invite when they sign in. Once accepted, they can view and edit this trip.
+        <p style={{ fontSize: 11, color: 'var(--ink3)', marginTop: 6 }}>
+          They'll see a pending invite when they sign in. They must accept to join.
         </p>
       </div>
 
-      {members.length > 0 && (
-        <div>
-          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink3)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 10 }}>
-            Shared with
+      {(pendingInvites.length > 0 || acceptedMembers.length > 0) && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink3)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 6 }}>
+            People with access
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {members.map(m => (
-              <div key={m} style={{
-                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                padding: '8px 12px', background: 'var(--surface2)', borderRadius: 'var(--radius-sm)',
-                border: '1px solid var(--border)'
-              }}>
-                <span style={{ fontSize: 13, color: 'var(--ink2)' }}>{m}</span>
-                <button className="btn btn-ghost btn-sm" style={{ color: 'var(--rose)', borderColor: 'var(--rose)', opacity: 0.7 }} onClick={() => handleRevoke(m)}>
-                  Remove
-                </button>
-              </div>
-            ))}
-          </div>
+          {acceptedMembers.map(m => <Row key={m} emailAddr={m} label="✓ joined" />)}
+          {pendingInvites.map(m => <Row key={m} emailAddr={m} label="⏳ pending" />)}
         </div>
       )}
     </Modal>
@@ -430,26 +444,24 @@ const ShareTripModal = ({ trip, currentUser, onClose, showToast }) => {
 };
 
 /* ─────────────────────────────────────────────
-   Pending Invites Banner (shown on Dashboard)
+   Pending Invites Banner
 ───────────────────────────────────────────── */
-const PendingInvitesBanner = ({ invites, currentUser, onAccept, onDecline }) => {
+const InvitesBanner = ({ invites, onAccept, onDecline }) => {
   if (!invites.length) return null;
   return (
     <div style={{ marginBottom: 28 }}>
       <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink3)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
-        <Icon name="bell" size={13} /> Pending Invites
+        <Icon name="bell" size={13} /> Pending Invites ({invites.length})
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         {invites.map(inv => (
           <div key={inv.id} style={{
             display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12,
-            padding: '14px 18px', background: 'var(--surface)', border: '1px solid var(--accent)',
-            borderRadius: 'var(--radius)', boxShadow: `0 0 0 1px var(--accent-glow)`,
+            padding: '14px 18px', background: 'var(--surface)',
+            border: '1px solid var(--accent)', borderRadius: 'var(--radius)',
           }}>
             <div>
-              <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--ink)' }}>
-                <Icon name="share" size={13} style={{ marginRight: 6 }} /> {inv.tripName}
-              </div>
+              <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--ink)' }}>{inv.tripName}</div>
               <div style={{ fontSize: 12, color: 'var(--ink3)', marginTop: 3 }}>
                 Invited by {inv.ownerName || inv.ownerEmail}
               </div>
@@ -470,19 +482,21 @@ const PendingInvitesBanner = ({ invites, currentUser, onAccept, onDecline }) => 
 };
 
 /* ─────────────────────────────────────────────
-   useTrips — own + shared trips + invites
+   useData — all Firestore listeners + mutations
 ───────────────────────────────────────────── */
-const useTrips = (userId, userEmail) => {
+const useData = (userId, userEmail) => {
   const [ownTrips,    setOwnTrips]    = useState([]);
   const [sharedTrips, setSharedTrips] = useState([]);
   const [invites,     setInvites]     = useState([]);
   const [loading,     setLoading]     = useState(true);
   const [saving,      setSaving]      = useState(false);
 
-  // Own trips listener
+  /* ── Listeners ── */
+
+  // Own private trips
   useEffect(() => {
     if (!userId) return;
-    const unsub = onSnapshot(tripsCol(userId), snap => {
+    return onSnapshot(tripsCol(userId), snap => {
       const data = snap.docs.map(d => ({ id: d.id, ...d.data(), _own: true }));
       data.sort((a, b) => {
         if (a.createdAt && b.createdAt) return a.createdAt.seconds - b.createdAt.seconds;
@@ -491,156 +505,299 @@ const useTrips = (userId, userEmail) => {
       setOwnTrips(data);
       setLoading(false);
     });
-    return unsub;
   }, [userId]);
 
-  // Shared trips listener — trips where this user is in memberUids
+  // Shared trips where user is an accepted member
   useEffect(() => {
     if (!userId) return;
     const q = query(collection(db, 'sharedTrips'), where('memberUids', 'array-contains', userId));
-    const unsub = onSnapshot(q, snap => {
-      const data = snap.docs.map(d => ({ id: d.id, ...d.data(), _shared: true }));
-      setSharedTrips(data);
+    return onSnapshot(q, snap => {
+      setSharedTrips(snap.docs.map(d => ({ id: d.id, ...d.data(), _shared: true })));
     });
-    return unsub;
   }, [userId]);
 
-  // Pending invites for this user's email
+  // Pending invites addressed to this user's email
   useEffect(() => {
     if (!userEmail) return;
-    const q = query(invitesCol(), where('inviteeEmail', '==', userEmail.toLowerCase()), where('status', '==', 'pending'));
-    const unsub = onSnapshot(q, snap => {
+    const q = query(
+      collection(db, 'invites'),
+      where('inviteeEmail', '==', userEmail.toLowerCase()),
+      where('status', '==', 'pending')
+    );
+    return onSnapshot(q, snap => {
       setInvites(snap.docs.map(d => ({ id: d.id, ...d.data() })));
     });
-    return unsub;
   }, [userEmail]);
 
-  const updateTrip = useCallback(async (trip) => {
+  /* ── Trip mutations ── */
+
+  const saveTrip = useCallback(async (trip) => {
     if (!userId) return;
     setSaving(true);
     try {
-      const isShared = !!trip._shared;
-      await saveTripDoc(userId, trip, isShared);
+      const { id, _own, _shared, ...data } = trip;
+      if (_shared) {
+        // Write to sharedTrips (collaborative copy)
+        await setDoc(sharedRef(id), { ...data, updatedAt: serverTimestamp() }, { merge: true });
+      } else {
+        // Write to private trips
+        await setDoc(tripRef(userId, id), { ...data, updatedAt: serverTimestamp() }, { merge: true });
+        // Also keep sharedTrips in sync if this trip has been shared
+        const sSnap = await getDoc(sharedRef(id));
+        if (sSnap.exists()) {
+          await setDoc(sharedRef(id), { ...data, updatedAt: serverTimestamp() }, { merge: true });
+        }
+      }
     } finally { setSaving(false); }
   }, [userId]);
 
-  const deleteTrip = useCallback(async (trip) => {
+  const removeTrip = useCallback(async (trip) => {
     if (!userId) return;
     if (trip._shared) {
-      // User is leaving a shared trip, not deleting it
-      await updateDoc(sharedDocRef(trip.id), { 
-        memberUids: arrayRemove(userId), 
-        memberEmails: arrayRemove(userEmail)
-      });
-    } else {
-      // User owns this trip completely
-      await deleteDoc(tripDocRef(userId, trip.id));
-    }
-  }, [userId, userEmail]);
-
-
-  const acceptInvite = useCallback(async (invite) => {
-    if (!userId || !userEmail) return;
-    try {
-      // The sharedTrips doc already exists (created when the invite was sent).
-      // Just add this user to memberUids and memberEmails.
-      await updateDoc(sharedDocRef(invite.tripId), {
-        memberUids:   arrayUnion(userId),
-        memberEmails: arrayUnion(userEmail),
+      // Leave the shared trip (remove self from memberUids)
+      await updateDoc(sharedRef(trip.id), {
+        memberUids:   arrayRemove(userId),
+        memberEmails: arrayRemove(userEmail.toLowerCase()),
         updatedAt:    serverTimestamp(),
       });
-
-      // Delete the invite — it's been consumed
-      await deleteDoc(doc(db, 'invites', invite.id));
-    } catch (err) {
-      console.error('acceptInvite error', err);
-      throw err;
+    } else {
+      // Delete private trip
+      await deleteDoc(tripRef(userId, trip.id));
+      // If it had a sharedTrip doc and owner is deleting, delete that too
+      const sSnap = await getDoc(sharedRef(trip.id));
+      if (sSnap.exists() && sSnap.data().ownerId === userId) {
+        await deleteDoc(sharedRef(trip.id));
+      }
     }
   }, [userId, userEmail]);
 
-    const declineInvite = useCallback(async (invite) => {
-      await deleteDoc(doc(db, 'invites', invite.id));
-    }, []);
+  /* ── Invite mutations ── */
 
-    return { ownTrips, sharedTrips, invites, loading, saving, updateTrip, deleteTrip, acceptInvite, declineInvite };
+  // Accept: add self to sharedTrips memberUids, delete invite, remove from pendingInvites
+  const acceptInvite = useCallback(async (invite) => {
+    if (!userId || !userEmail) return;
+    // sharedTrips doc is guaranteed to exist (created when invite was sent)
+    await updateDoc(sharedRef(invite.tripId), {
+      memberUids:     arrayUnion(userId),
+      memberEmails:   arrayUnion(userEmail.toLowerCase()),
+      pendingInvites: arrayRemove(userEmail.toLowerCase()),
+      updatedAt:      serverTimestamp(),
+    });
+    await deleteDoc(doc(db, 'invites', invite.id));
+    // Sync pendingInvites on owner's private trip
+    try {
+      await updateDoc(tripRef(invite.ownerUid, invite.tripId), {
+        pendingInvites: arrayRemove(userEmail.toLowerCase()),
+      });
+    } catch { /* owner's private trip write may fail if we don't have access — acceptable */ }
+  }, [userId, userEmail]);
+
+  // Decline: just delete the invite doc + remove from pendingInvites
+  const declineInvite = useCallback(async (invite) => {
+    await deleteDoc(doc(db, 'invites', invite.id));
+    // Remove from sharedTrips pendingInvites list
+    try {
+      await updateDoc(sharedRef(invite.tripId), {
+        pendingInvites: arrayRemove(userEmail.toLowerCase()),
+        updatedAt:      serverTimestamp(),
+      });
+    } catch { /* sharedTrip may not exist if owner deleted it */ }
+  }, [userEmail]);
+
+  return {
+    ownTrips, sharedTrips, invites,
+    loading, saving,
+    saveTrip, removeTrip,
+    acceptInvite, declineInvite,
   };
+};
 
 /* ─────────────────────────────────────────────
    Form Modals
 ───────────────────────────────────────────── */
 const TripFormModal = ({ trip, onSave, onClose }) => {
   const [form, setForm] = useState({
-    name: trip?.name || '', startDate: trip?.startDate || '',
-    endDate: trip?.endDate || '', type: trip?.type || 'vacation', notes: trip?.notes || '',
+    name:      trip?.name      || '',
+    startDate: trip?.startDate || '',
+    endDate:   trip?.endDate   || '',
+    type:      trip?.type      || 'vacation',
+    notes:     trip?.notes     || '',
   });
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const valid = form.name.trim() && form.startDate && form.endDate && form.endDate >= form.startDate;
+
   const handleSave = () => {
     if (!valid) return;
-    onSave({ id: trip?.id || uid(), events: trip?.events || [], collections: trip?.collections || {}, customCollections: trip?.customCollections || [], memberEmails: trip?.memberEmails || [], memberUids: trip?.memberUids || [], ...form, name: form.name.trim() });
+    onSave({
+      id:               trip?.id             || uid(),
+      events:           trip?.events         || [],
+      collections:      trip?.collections    || {},
+      customCollections:trip?.customCollections || [],
+      pendingInvites:   trip?.pendingInvites  || [],
+      memberEmails:     trip?.memberEmails    || [],
+      memberUids:       trip?.memberUids      || [],
+      ...form,
+      name: form.name.trim(),
+    });
   };
+
   return (
-    <Modal title={trip ? 'Edit Trip' : 'New Trip'} onClose={onClose}
-      footer={<><button className="btn btn-ghost" onClick={onClose}>Cancel</button><button className="btn btn-primary" onClick={handleSave} disabled={!valid}>{trip ? 'Save Changes' : 'Create Trip'}</button></>}
+    <Modal title={trip?.id ? 'Edit Trip' : 'New Trip'} onClose={onClose}
+      footer={
+        <>
+          <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn btn-primary" onClick={handleSave} disabled={!valid}>
+            {trip?.id ? 'Save Changes' : 'Create Trip'}
+          </button>
+        </>
+      }
     >
-      <div className="field"><label>Trip Name</label><input value={form.name} onChange={e => set('name', e.target.value)} placeholder="e.g. Summer in Italy" autoFocus /></div>
-      <div className="field-row">
-        <div className="field"><label>Start Date</label><input type="date" value={form.startDate} onChange={e => set('startDate', e.target.value)} /></div>
-        <div className="field"><label>End Date</label><input type="date" value={form.endDate} min={form.startDate} onChange={e => set('endDate', e.target.value)} /></div>
+      <div className="field">
+        <label>Trip Name</label>
+        <input value={form.name} onChange={e => set('name', e.target.value)} placeholder="e.g. Summer in Italy" autoFocus />
       </div>
-      <div className="field"><label>Trip Type</label>
+      <div className="field-row">
+        <div className="field">
+          <label>Start Date</label>
+          <input type="date" value={form.startDate} onChange={e => set('startDate', e.target.value)} />
+        </div>
+        <div className="field">
+          <label>End Date</label>
+          <input type="date" value={form.endDate} min={form.startDate} onChange={e => set('endDate', e.target.value)} />
+        </div>
+      </div>
+      <div className="field">
+        <label>Trip Type</label>
         <select value={form.type} onChange={e => set('type', e.target.value)}>
           {TRIP_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
         </select>
       </div>
-      <div className="field"><label>Notes (optional)</label><textarea value={form.notes} onChange={e => set('notes', e.target.value)} placeholder="Any trip-wide notes…" rows={2} /></div>
+      <div className="field">
+        <label>Notes <span style={{ fontWeight: 400, color: 'var(--ink3)' }}>(optional)</span></label>
+        <textarea value={form.notes} onChange={e => set('notes', e.target.value)} placeholder="Any trip-wide notes…" rows={2} />
+      </div>
     </Modal>
   );
 };
 
 const EventFormModal = ({ event, dayIndex, onSave, onClose }) => {
   const [form, setForm] = useState({
-    title: event?.title || '', period: event?.period || 'morning',
-    startTime: event?.startTime || '', endTime: event?.endTime || '',
-    category: event?.category || 'attraction', notes: event?.notes || '', link: event?.link || '',
+    title:     event?.title     || '',
+    period:    event?.period    || 'morning',
+    startTime: event?.startTime || '',
+    endTime:   event?.endTime   || '',
+    category:  event?.category  || 'attraction',
+    notes:     event?.notes     || '',
+    link:      event?.link      || '',
   });
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const valid = form.title.trim();
-  const handleSave = () => { if (!valid) return; onSave({ id: event?.id || uid(), dayIndex, ...form, title: form.title.trim() }); };
+  const handleSave = () => {
+    if (!valid) return;
+    onSave({ id: event?.id || uid(), dayIndex, ...form, title: form.title.trim() });
+  };
   return (
     <Modal title={event?.id ? 'Edit Event' : 'Add Event'} onClose={onClose}
-      footer={<><button className="btn btn-ghost" onClick={onClose}>Cancel</button><button className="btn btn-primary" onClick={handleSave} disabled={!valid}>{event?.id ? 'Save Changes' : 'Add Event'}</button></>}
+      footer={
+        <>
+          <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn btn-primary" onClick={handleSave} disabled={!valid}>
+            {event?.id ? 'Save Changes' : 'Add Event'}
+          </button>
+        </>
+      }
     >
-      <div className="field"><label>Title</label><input value={form.title} onChange={e => set('title', e.target.value)} placeholder="e.g. Visit the Colosseum" autoFocus /></div>
-      <div className="field-row">
-        <div className="field"><label>Period</label><select value={form.period} onChange={e => set('period', e.target.value)}>{PERIODS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}</select></div>
-        <div className="field"><label>Category</label><select value={form.category} onChange={e => set('category', e.target.value)}>{CATEGORIES.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}</select></div>
+      <div className="field">
+        <label>Title</label>
+        <input value={form.title} onChange={e => set('title', e.target.value)} placeholder="e.g. Visit the Colosseum" autoFocus />
       </div>
       <div className="field-row">
-        <div className="field"><label>Start Time (optional)</label><input type="time" value={form.startTime} onChange={e => set('startTime', e.target.value)} /></div>
-        <div className="field"><label>End Time (optional)</label><input type="time" value={form.endTime} onChange={e => set('endTime', e.target.value)} /></div>
+        <div className="field">
+          <label>Period</label>
+          <select value={form.period} onChange={e => set('period', e.target.value)}>
+            {PERIODS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+          </select>
+        </div>
+        <div className="field">
+          <label>Category</label>
+          <select value={form.category} onChange={e => set('category', e.target.value)}>
+            {CATEGORIES.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
+          </select>
+        </div>
       </div>
-      <div className="field"><label>Notes (optional)</label><textarea value={form.notes} onChange={e => set('notes', e.target.value)} placeholder="Any details…" rows={2} /></div>
-      <div className="field"><label>Link (optional)</label><input value={form.link} onChange={e => set('link', e.target.value)} placeholder="Google Maps, website URL…" /></div>
+      <div className="field-row">
+        <div className="field">
+          <label>Start Time <span style={{ fontWeight: 400, color: 'var(--ink3)' }}>(optional)</span></label>
+          <input type="time" value={form.startTime} onChange={e => set('startTime', e.target.value)} />
+        </div>
+        <div className="field">
+          <label>End Time <span style={{ fontWeight: 400, color: 'var(--ink3)' }}>(optional)</span></label>
+          <input type="time" value={form.endTime} onChange={e => set('endTime', e.target.value)} />
+        </div>
+      </div>
+      <div className="field">
+        <label>Notes <span style={{ fontWeight: 400, color: 'var(--ink3)' }}>(optional)</span></label>
+        <textarea value={form.notes} onChange={e => set('notes', e.target.value)} placeholder="Any details…" rows={2} />
+      </div>
+      <div className="field">
+        <label>Link <span style={{ fontWeight: 400, color: 'var(--ink3)' }}>(optional)</span></label>
+        <input value={form.link} onChange={e => set('link', e.target.value)} placeholder="Google Maps, website URL…" />
+      </div>
     </Modal>
   );
 };
 
 const PlaceFormModal = ({ place, defaultCategory, customCollections, onSave, onClose }) => {
-  const allOptions = [...COLLECTION_TYPES, ...(customCollections || []).map(c => ({ value: c.id, label: c.name, icon: '📁' }))];
-  const [form, setForm] = useState({ name: place?.name || '', category: place?.category || defaultCategory || 'restaurant', location: place?.location || '', notes: place?.notes || '', link: place?.link || '' });
+  const allOptions = [
+    ...COLLECTION_TYPES,
+    ...(customCollections || []).map(c => ({ value: c.id, label: c.name, icon: '📁' })),
+  ];
+  const [form, setForm] = useState({
+    name:     place?.name     || '',
+    category: place?.category || defaultCategory || 'restaurant',
+    location: place?.location || '',
+    notes:    place?.notes    || '',
+    link:     place?.link     || '',
+  });
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const valid = form.name.trim();
-  const handleSave = () => { if (!valid) return; onSave({ id: place?.id || uid(), ...form, name: form.name.trim() }); };
+  const handleSave = () => {
+    if (!valid) return;
+    onSave({ id: place?.id || uid(), ...form, name: form.name.trim() });
+  };
   return (
     <Modal title={place ? 'Edit Place' : 'Add to Collection'} onClose={onClose}
-      footer={<><button className="btn btn-ghost" onClick={onClose}>Cancel</button><button className="btn btn-primary" onClick={handleSave} disabled={!valid}>{place ? 'Save Changes' : 'Add Place'}</button></>}
+      footer={
+        <>
+          <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn btn-primary" onClick={handleSave} disabled={!valid}>
+            {place ? 'Save Changes' : 'Add Place'}
+          </button>
+        </>
+      }
     >
-      <div className="field"><label>Place Name</label><input value={form.name} onChange={e => set('name', e.target.value)} placeholder="e.g. Trevi Fountain" autoFocus /></div>
-      <div className="field"><label>Collection</label><select value={form.category} onChange={e => set('category', e.target.value)}>{allOptions.map(c => <option key={c.value} value={c.value}>{c.icon} {c.label}</option>)}</select></div>
-      <div className="field"><label>Location / Address (optional)</label><input value={form.location} onChange={e => set('location', e.target.value)} placeholder="e.g. Piazza di Trevi, Rome" /></div>
-      <div className="field"><label>Notes (optional)</label><textarea value={form.notes} onChange={e => set('notes', e.target.value)} placeholder="Opening hours, tips…" rows={2} /></div>
-      <div className="field"><label>Link (optional)</label><input value={form.link} onChange={e => set('link', e.target.value)} placeholder="Google Maps or website URL" /></div>
+      <div className="field">
+        <label>Place Name</label>
+        <input value={form.name} onChange={e => set('name', e.target.value)} placeholder="e.g. Trevi Fountain" autoFocus />
+      </div>
+      <div className="field">
+        <label>Collection</label>
+        <select value={form.category} onChange={e => set('category', e.target.value)}>
+          {allOptions.map(c => <option key={c.value} value={c.value}>{c.icon} {c.label}</option>)}
+        </select>
+      </div>
+      <div className="field">
+        <label>Location / Address <span style={{ fontWeight: 400, color: 'var(--ink3)' }}>(optional)</span></label>
+        <input value={form.location} onChange={e => set('location', e.target.value)} placeholder="e.g. Piazza di Trevi, Rome" />
+      </div>
+      <div className="field">
+        <label>Notes <span style={{ fontWeight: 400, color: 'var(--ink3)' }}>(optional)</span></label>
+        <textarea value={form.notes} onChange={e => set('notes', e.target.value)} placeholder="Opening hours, tips…" rows={2} />
+      </div>
+      <div className="field">
+        <label>Link <span style={{ fontWeight: 400, color: 'var(--ink3)' }}>(optional)</span></label>
+        <input value={form.link} onChange={e => set('link', e.target.value)} placeholder="Google Maps or website URL" />
+      </div>
     </Modal>
   );
 };
@@ -650,25 +807,25 @@ const CustomCollectionModal = ({ onSave, onClose }) => {
   const handleSave = () => { if (!name.trim()) return; onSave({ id: uid(), name: name.trim() }); };
   return (
     <Modal title="New Custom Collection" onClose={onClose}
-      footer={<><button className="btn btn-ghost" onClick={onClose}>Cancel</button><button className="btn btn-primary" onClick={handleSave} disabled={!name.trim()}>Create</button></>}
+      footer={
+        <>
+          <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn btn-primary" onClick={handleSave} disabled={!name.trim()}>Create</button>
+        </>
+      }
     >
-      <div className="field"><label>Collection Name</label><input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Nightlife, Shopping…" autoFocus onKeyDown={e => e.key === 'Enter' && handleSave()} /></div>
+      <div className="field">
+        <label>Collection Name</label>
+        <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Nightlife, Shopping…" autoFocus onKeyDown={e => e.key === 'Enter' && handleSave()} />
+      </div>
     </Modal>
   );
 };
 
-const ConfirmModal = ({ message, onConfirm, onClose }) => (
-  <Modal title="Confirm" onClose={onClose}
-    footer={<><button className="btn btn-ghost" onClick={onClose}>Cancel</button><button className="btn btn-danger" onClick={() => { onConfirm(); onClose(); }}>Delete</button></>}
-  >
-    <p style={{ color: 'var(--ink2)', fontSize: 14 }}>{message}</p>
-  </Modal>
-);
-
 /* ─────────────────────────────────────────────
    Dashboard
 ───────────────────────────────────────────── */
-const Dashboard = ({ ownTrips, sharedTrips, invites, currentUser, updateTrip, deleteTrip, acceptInvite, declineInvite, onOpenTrip, showToast }) => {
+const Dashboard = ({ ownTrips, sharedTrips, invites, currentUser, saveTrip, removeTrip, acceptInvite, declineInvite, onOpenTrip, showToast }) => {
   const [showForm,      setShowForm]      = useState(false);
   const [editTrip,      setEditTrip]      = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
@@ -676,14 +833,13 @@ const Dashboard = ({ ownTrips, sharedTrips, invites, currentUser, updateTrip, de
 
   const handleExport = () => {
     const blob = new Blob([JSON.stringify({ trips: ownTrips }, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href = url; a.download = 'wandr-backup.json'; a.click();
-    URL.revokeObjectURL(url);
+    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'wandr-backup.json' });
+    a.click();
     showToast('Backup exported', 'success');
   };
 
   const handleImport = () => {
-    const input = document.createElement('input'); input.type = 'file'; input.accept = '.json';
+    const input = Object.assign(document.createElement('input'), { type: 'file', accept: '.json' });
     input.onchange = e => {
       const file = e.target.files[0]; if (!file) return;
       const reader = new FileReader();
@@ -691,7 +847,7 @@ const Dashboard = ({ ownTrips, sharedTrips, invites, currentUser, updateTrip, de
         try {
           const data = JSON.parse(ev.target.result);
           if (!Array.isArray(data.trips)) throw new Error();
-          for (const trip of data.trips) await updateTrip(trip);
+          for (const t of data.trips) await saveTrip(t);
           showToast('Backup imported', 'success');
         } catch { showToast('Invalid backup file', 'error'); }
       };
@@ -701,46 +857,67 @@ const Dashboard = ({ ownTrips, sharedTrips, invites, currentUser, updateTrip, de
   };
 
   const now = new Date();
-  const categorise = (list) => {
-    const active   = list.filter(t => { if (!t.startDate || !t.endDate) return false; const s = new Date(t.startDate+'T00:00:00'), e = new Date(t.endDate+'T00:00:00'); return s <= now && now <= e; });
+  const categorise = list => {
+    const active   = list.filter(t => t.startDate && t.endDate && new Date(t.startDate+'T00:00:00') <= now && now <= new Date(t.endDate+'T00:00:00'));
     const upcoming = list.filter(t => t.startDate && new Date(t.startDate+'T00:00:00') > now);
     const past     = list.filter(t => t.endDate && new Date(t.endDate+'T00:00:00') < now && !active.includes(t));
     const none     = list.filter(t => !t.startDate);
-    return [...(active.length ? [{ label: '✈️ Active', items: active }] : []),
-            ...(upcoming.length ? [{ label: '🗓️ Upcoming', items: upcoming }] : []),
-            ...(past.length ? [{ label: '📁 Past', items: past }] : []),
-            ...(none.length ? [{ label: 'All Trips', items: none }] : [])];
+    return [
+      ...(active.length   ? [{ label: '✈️ Active',   items: active   }] : []),
+      ...(upcoming.length ? [{ label: '🗓️ Upcoming', items: upcoming }] : []),
+      ...(past.length     ? [{ label: '📁 Past',     items: past     }] : []),
+      ...(none.length     ? [{ label: 'All Trips',   items: none     }] : []),
+    ];
   };
 
-  const renderTrip = (trip) => {
-    const ti = tripTypeInfo(trip.type);
-    const days = daysBetween(trip.startDate, trip.endDate);
-    const evCount = (trip.events || []).length;
-    const placeCount = Object.values(trip.collections || {}).reduce((s, a) => s + a.length, 0);
-    const isShared = !!trip._shared;
-    const memberCount = (trip.memberEmails || []).length;
-    const isOwner = !isShared || trip.ownerId === currentUser?.uid;
+  const renderTrip = trip => {
+    const ti          = tripTypeInfo(trip.type);
+    const days        = daysBetween(trip.startDate, trip.endDate);
+    const evCount     = (trip.events || []).length;
+    const placeCount  = Object.values(trip.collections || {}).reduce((s, a) => s + a.length, 0);
+    const isShared    = !!trip._shared;
+    const memberCount = ((trip.memberEmails || []).filter(e => e !== currentUser?.email?.toLowerCase())).length;
+
     return (
-      <div key={trip.id} className="card trip-card" onClick={() => onOpenTrip(trip)}>
+      <div key={trip.id} className="card trip-card" onClick={() => onOpenTrip(trip)} role="button" tabIndex={0}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
             <span className={`trip-type-badge ${ti.cls}`}>{ti.label}</span>
-            {isShared && <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--teal)', background: 'rgba(45,212,191,0.12)', padding: '2px 8px', borderRadius: 99, textTransform: 'uppercase', letterSpacing: '0.3px' }}>Shared</span>}
+            {isShared && (
+              <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--teal)', background: 'rgba(45,212,191,0.12)', padding: '2px 8px', borderRadius: 99, textTransform: 'uppercase' }}>
+                Shared
+              </span>
+            )}
           </div>
           <div style={{ display: 'flex', gap: 4 }} onClick={e => e.stopPropagation()}>
-            {!isShared && <button className="btn-icon" title="Share trip" onClick={() => setShareTrip(trip)}><Icon name="share" size={13} /></button>}
-            {!isShared && <button className="btn-icon" onClick={() => { setEditTrip(trip); setShowForm(true); }}><Icon name="edit" size={13} /></button>}
-            <button className="btn-icon" onClick={() => setConfirmDelete(trip)} title={isShared ? 'Leave trip' : 'Delete trip'}><Icon name="trash" size={13} /></button>
+            {!isShared && (
+              <button className="btn-icon" title="Share" onClick={() => setShareTrip(trip)}>
+                <Icon name="share" size={13} />
+              </button>
+            )}
+            {!isShared && (
+              <button className="btn-icon" title="Edit" onClick={() => { setEditTrip(trip); setShowForm(true); }}>
+                <Icon name="edit" size={13} />
+              </button>
+            )}
+            <button className="btn-icon" title={isShared ? 'Leave' : 'Delete'} onClick={() => setConfirmDelete(trip)}>
+              <Icon name="trash" size={13} />
+            </button>
           </div>
         </div>
+
         <div className="trip-card-title">{trip.name}</div>
         {isShared && <div style={{ fontSize: 11, color: 'var(--ink3)', marginBottom: 2 }}>by {trip.ownerEmail}</div>}
-        <div className="trip-card-dates">{trip.startDate ? `${formatDate(trip.startDate)} → ${formatDate(trip.endDate)}` : 'No dates set'}</div>
+        <div className="trip-card-dates">
+          {trip.startDate ? `${formatDate(trip.startDate)} → ${formatDate(trip.endDate)}` : 'No dates set'}
+        </div>
         <div className="trip-card-meta">
           <div className="trip-meta-item"><strong>{days}</strong>days</div>
           <div className="trip-meta-item"><strong>{evCount}</strong>events</div>
           <div className="trip-meta-item"><strong>{placeCount}</strong>places</div>
-          {memberCount > 0 && <div className="trip-meta-item"><strong>{memberCount}</strong>{memberCount === 1 ? 'collab' : 'collabs'}</div>}
+          {memberCount > 0 && (
+            <div className="trip-meta-item"><strong>{memberCount}</strong>{memberCount === 1 ? 'collab' : 'collabs'}</div>
+          )}
         </div>
       </div>
     );
@@ -760,36 +937,44 @@ const Dashboard = ({ ownTrips, sharedTrips, invites, currentUser, updateTrip, de
         <div style={{ display: 'flex', gap: 8 }}>
           <button className="btn btn-ghost btn-sm" onClick={handleImport}><Icon name="upload" size={13} /> Import</button>
           <button className="btn btn-ghost btn-sm" onClick={handleExport}><Icon name="download" size={13} /> Export</button>
-          <button className="btn btn-primary" onClick={() => { setEditTrip(null); setShowForm(true); }}><Icon name="plus" size={14} /> New Trip</button>
+          <button className="btn btn-primary" onClick={() => { setEditTrip(null); setShowForm(true); }}>
+            <Icon name="plus" size={14} /> New Trip
+          </button>
         </div>
       </div>
 
-      {/* Pending invites */}
-      <PendingInvitesBanner
+      <InvitesBanner
         invites={invites}
-        currentUser={currentUser}
-        onAccept={async inv => { try { await acceptInvite(inv); showToast(`Joined "${inv.tripName}"`, 'success'); } catch { showToast('Failed to accept invite', 'error'); } }}
-        onDecline={async inv => { await declineInvite(inv); showToast('Invite declined', 'success'); }}
+        onAccept={async inv => {
+          try { await acceptInvite(inv); showToast(`Joined "${inv.tripName}"`, 'success'); }
+          catch (e) { console.error(e); showToast('Failed to accept invite', 'error'); }
+        }}
+        onDecline={async inv => {
+          await declineInvite(inv);
+          showToast('Invite declined', 'success');
+        }}
       />
 
       {totalTrips === 0 ? (
         <div className="empty-state">
           <div className="icon">🗺️</div>
           <h3>No trips yet</h3>
-          <p>Create your first trip to start planning your adventure</p>
-          <button className="btn btn-primary" onClick={() => setShowForm(true)}><Icon name="plus" size={14} /> Create Trip</button>
+          <p>Create your first trip to start planning</p>
+          <button className="btn btn-primary" onClick={() => setShowForm(true)}>
+            <Icon name="plus" size={14} /> Create Trip
+          </button>
         </div>
       ) : (
         <>
-          {/* Own trips */}
           {ownGrouped.map(g => (
             <div key={g.label} style={{ marginBottom: 28 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink3)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 12 }}>{g.label}</div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink3)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 12 }}>
+                {g.label}
+              </div>
               <div className="trip-grid">{g.items.map(renderTrip)}</div>
             </div>
           ))}
 
-          {/* Shared trips */}
           {sharedTrips.length > 0 && (
             <div style={{ marginBottom: 28 }}>
               <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink3)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -801,38 +986,47 @@ const Dashboard = ({ ownTrips, sharedTrips, invites, currentUser, updateTrip, de
 
           <div className="trip-grid">
             <div className="card trip-card-new" onClick={() => { setEditTrip(null); setShowForm(true); }}>
-              <Icon name="plus" size={24} />
-              <span>Plan a new trip</span>
+              <Icon name="plus" size={24} /><span>Plan a new trip</span>
             </div>
           </div>
         </>
       )}
 
       {showForm && (
-        <TripFormModal trip={editTrip}
-          onSave={async trip => {
-            await updateTrip({ ...trip, createdAt: editTrip?.createdAt || null });
+        <TripFormModal
+          trip={editTrip}
+          onSave={async t => {
+            await saveTrip({ ...t, createdAt: editTrip?.createdAt || null });
             showToast(editTrip ? 'Trip updated' : 'Trip created!', 'success');
             setShowForm(false);
           }}
-          onClose={() => setShowForm(false)} />
+          onClose={() => setShowForm(false)}
+        />
       )}
 
       {confirmDelete && (
         <ConfirmModal
-          message={confirmDelete._shared
-            ? `Leave "${confirmDelete.name}"? You'll lose access to this shared trip.`
-            : `Delete "${confirmDelete.name}" and all its data? This cannot be undone.`}
+          message={
+            confirmDelete._shared
+              ? `Leave "${confirmDelete.name}"? You'll lose access to this shared trip.`
+              : `Delete "${confirmDelete.name}" and all its data? This cannot be undone.`
+          }
+          confirmLabel={confirmDelete._shared ? 'Leave' : 'Delete'}
           onConfirm={async () => {
-            await deleteTrip(confirmDelete);
+            await removeTrip(confirmDelete);
             showToast(confirmDelete._shared ? 'Left trip' : 'Trip deleted', 'success');
-            setConfirmDelete(null);
           }}
-          onClose={() => setConfirmDelete(null)} />
+          onClose={() => setConfirmDelete(null)}
+        />
       )}
 
       {shareTrip && (
-        <ShareTripModal trip={shareTrip} currentUser={currentUser} onClose={() => setShareTrip(null)} showToast={showToast} />
+        <ShareTripModal
+          trip={shareTrip}
+          currentUser={currentUser}
+          onClose={() => setShareTrip(null)}
+          showToast={showToast}
+        />
       )}
     </div>
   );
@@ -841,42 +1035,46 @@ const Dashboard = ({ ownTrips, sharedTrips, invites, currentUser, updateTrip, de
 /* ─────────────────────────────────────────────
    ItineraryView
 ───────────────────────────────────────────── */
-const ItineraryView = ({ trip, updateTrip, showToast }) => {
-  const totalDays = daysBetween(trip.startDate, trip.endDate) || 1;
-  const [activeDay,      setActiveDay]      = useState(0);
-  const [showEventForm,  setShowEventForm]  = useState(false);
-  const [editEvent,      setEditEvent]      = useState(null);
-  const [confirmDelete,  setConfirmDelete]  = useState(null);
-  const [defaultPeriod,  setDefaultPeriod]  = useState('morning');
+const ItineraryView = ({ trip, saveTrip, showToast }) => {
+  const totalDays   = daysBetween(trip.startDate, trip.endDate) || 1;
+  const [activeDay, setActiveDay] = useState(0);
+  const [showForm,  setShowForm]  = useState(false);
+  const [editEvent, setEditEvent] = useState(null);
+  const [deleting,  setDeleting]  = useState(null);
+  const [defPeriod, setDefPeriod] = useState('morning');
 
-  const dayEvents      = useMemo(() => (trip.events || []).filter(e => e.dayIndex === activeDay), [trip.events, activeDay]);
-  const eventsByPeriod = useMemo(() => {
+  const dayEvents = useMemo(
+    () => (trip.events || []).filter(e => e.dayIndex === activeDay),
+    [trip.events, activeDay]
+  );
+
+  const byPeriod = useMemo(() => {
     const map = {}; PERIODS.forEach(p => { map[p.id] = []; });
     dayEvents.forEach(e => { if (map[e.period]) map[e.period].push(e); });
     return map;
   }, [dayEvents]);
 
-  const fmtTime = (t) => {
+  const fmtTime = t => {
     if (!t) return '';
     const [h, m] = t.split(':'); const hr = parseInt(h);
     return `${hr === 0 ? 12 : hr > 12 ? hr - 12 : hr}:${m}${hr >= 12 ? 'pm' : 'am'}`;
   };
 
-  const mutate = async (newEvents) => await updateTrip({ ...trip, events: newEvents });
+  const mutateEvents = evs => saveTrip({ ...trip, events: evs });
 
-  const handleSaveEvent = async (ev) => {
-    const events = trip.events || [];
-    await mutate(editEvent ? events.map(e => e.id === ev.id ? ev : e) : [...events, ev]);
+  const handleSave = async ev => {
+    const evs = trip.events || [];
+    await mutateEvents(editEvent ? evs.map(e => e.id === ev.id ? ev : e) : [...evs, ev]);
     showToast(editEvent ? 'Event updated' : 'Event added', 'success');
-    setShowEventForm(false); setEditEvent(null);
+    setShowForm(false); setEditEvent(null);
   };
 
-  const handleDeleteEvent = async (evId) => {
-    await mutate((trip.events || []).filter(e => e.id !== evId));
-    showToast('Event removed', 'success'); setConfirmDelete(null);
+  const handleDelete = async evId => {
+    await mutateEvents((trip.events || []).filter(e => e.id !== evId));
+    showToast('Event removed', 'success');
   };
 
-  const openAdd = (period) => { setDefaultPeriod(period); setEditEvent(null); setShowEventForm(true); };
+  const openAdd = period => { setDefPeriod(period); setEditEvent(null); setShowForm(true); };
 
   return (
     <div className="planner-layout">
@@ -903,11 +1101,14 @@ const ItineraryView = ({ trip, updateTrip, showToast }) => {
             <div className="day-view-title">Day {activeDay + 1} — {getDayLabel(trip.startDate, activeDay)}</div>
             <div className="day-view-subtitle">{dayEvents.length} event{dayEvents.length !== 1 ? 's' : ''} scheduled</div>
           </div>
-          <button className="btn btn-primary" onClick={() => openAdd('morning')}><Icon name="plus" size={14} /> Add Event</button>
+          <button className="btn btn-primary" onClick={() => openAdd('morning')}>
+            <Icon name="plus" size={14} /> Add Event
+          </button>
         </div>
+
         <div className="time-periods">
           {PERIODS.map(period => {
-            const pevents = eventsByPeriod[period.id] || [];
+            const pevents = byPeriod[period.id] || [];
             return (
               <div key={period.id} className="period-section">
                 <div className="period-header">
@@ -916,28 +1117,40 @@ const ItineraryView = ({ trip, updateTrip, showToast }) => {
                   <div className="period-line" />
                 </div>
                 <div className="events-list">
-                  {pevents.length === 0 && <button className="add-event-btn" onClick={() => openAdd(period.id)}><Icon name="plus" size={13} /> Add {period.label.toLowerCase()} event</button>}
+                  {pevents.length === 0 && (
+                    <button className="add-event-btn" onClick={() => openAdd(period.id)}>
+                      <Icon name="plus" size={13} /> Add {period.label.toLowerCase()} event
+                    </button>
+                  )}
                   {pevents.map(ev => {
                     const cat = catInfo(ev.category);
                     return (
                       <div key={ev.id} className="card event-card">
                         <div className="event-time-col">
-                          {ev.startTime ? (<><div style={{ fontWeight: 500 }}>{fmtTime(ev.startTime)}</div>{ev.endTime && <div style={{ color: 'var(--ink3)' }}>{fmtTime(ev.endTime)}</div>}</>) : <div style={{ color: 'var(--ink3)' }}>—</div>}
+                          {ev.startTime
+                            ? <><div style={{ fontWeight: 500 }}>{fmtTime(ev.startTime)}</div>{ev.endTime && <div style={{ color: 'var(--ink3)' }}>{fmtTime(ev.endTime)}</div>}</>
+                            : <div style={{ color: 'var(--ink3)' }}>—</div>}
                         </div>
                         <div className="event-body">
                           <div className="event-title">{ev.title}</div>
-                          <div className="event-meta"><span className={`cat-badge ${cat.cls}`}>{cat.label}</span></div>
+                          <div className="event-meta">
+                            <span className={`cat-badge ${cat.cls}`}>{cat.label}</span>
+                          </div>
                           {ev.notes && <div className="event-notes">{ev.notes}</div>}
                           {ev.link && <a href={ev.link} target="_blank" rel="noopener noreferrer" className="event-link">🔗 Open link</a>}
                         </div>
                         <div className="event-actions">
-                          <button className="btn-icon" onClick={() => { setEditEvent(ev); setShowEventForm(true); }}><Icon name="edit" size={13} /></button>
-                          <button className="btn-icon" onClick={() => setConfirmDelete(ev.id)}><Icon name="trash" size={13} /></button>
+                          <button className="btn-icon" onClick={() => { setEditEvent(ev); setShowForm(true); }}><Icon name="edit" size={13} /></button>
+                          <button className="btn-icon" onClick={() => setDeleting(ev.id)}><Icon name="trash" size={13} /></button>
                         </div>
                       </div>
                     );
                   })}
-                  {pevents.length > 0 && <button className="add-event-btn" onClick={() => openAdd(period.id)}><Icon name="plus" size={13} /> Add another</button>}
+                  {pevents.length > 0 && (
+                    <button className="add-event-btn" onClick={() => openAdd(period.id)}>
+                      <Icon name="plus" size={13} /> Add another
+                    </button>
+                  )}
                 </div>
               </div>
             );
@@ -945,8 +1158,22 @@ const ItineraryView = ({ trip, updateTrip, showToast }) => {
         </div>
       </div>
 
-      {showEventForm && <EventFormModal event={editEvent || { period: defaultPeriod }} dayIndex={activeDay} onSave={handleSaveEvent} onClose={() => { setShowEventForm(false); setEditEvent(null); }} />}
-      {confirmDelete && <ConfirmModal message="Remove this event?" onConfirm={() => handleDeleteEvent(confirmDelete)} onClose={() => setConfirmDelete(null)} />}
+      {showForm && (
+        <EventFormModal
+          event={editEvent || { period: defPeriod }}
+          dayIndex={activeDay}
+          onSave={handleSave}
+          onClose={() => { setShowForm(false); setEditEvent(null); }}
+        />
+      )}
+      {deleting && (
+        <ConfirmModal
+          message="Remove this event from your itinerary?"
+          confirmLabel="Remove"
+          onConfirm={() => handleDelete(deleting)}
+          onClose={() => setDeleting(null)}
+        />
+      )}
     </div>
   );
 };
@@ -954,25 +1181,28 @@ const ItineraryView = ({ trip, updateTrip, showToast }) => {
 /* ─────────────────────────────────────────────
    CollectionsView
 ───────────────────────────────────────────── */
-const CollectionsView = ({ trip, updateTrip, showToast }) => {
-  const [showPlaceForm,     setShowPlaceForm]     = useState(false);
-  const [editPlace,         setEditPlace]         = useState(null);
-  const [defaultCat,        setDefaultCat]        = useState('restaurant');
-  const [confirmDelete,     setConfirmDelete]     = useState(null);
-  const [confirmDeleteCol,  setConfirmDeleteCol]  = useState(null);
-  const [importText,        setImportText]        = useState('');
-  const [importCat,         setImportCat]         = useState('restaurant');
-  const [showCustomColModal,setShowCustomColModal]= useState(false);
-  const [colTab,            setColTab]            = useState('all');
+const CollectionsView = ({ trip, saveTrip, showToast }) => {
+  const [showPlaceForm,      setShowPlaceForm]      = useState(false);
+  const [editPlace,          setEditPlace]          = useState(null);
+  const [defaultCat,         setDefaultCat]         = useState('restaurant');
+  const [confirmDeletePlace, setConfirmDeletePlace] = useState(null);
+  const [confirmDeleteCol,   setConfirmDeleteCol]   = useState(null);
+  const [importText,         setImportText]         = useState('');
+  const [importCat,          setImportCat]          = useState('restaurant');
+  const [showCustomModal,    setShowCustomModal]    = useState(false);
+  const [colTab,             setColTab]             = useState('all');
 
   const collections       = trip.collections       || {};
   const customCollections = trip.customCollections || [];
-  const allColTypes = [...COLLECTION_TYPES, ...customCollections.map(c => ({ value: c.id, label: c.name, icon: '📁', isCustom: true }))];
+  const allColTypes = [
+    ...COLLECTION_TYPES,
+    ...customCollections.map(c => ({ value: c.id, label: c.name, icon: '📁', isCustom: true })),
+  ];
 
-  const mutateCol = async (newCol, newCustom) =>
-    await updateTrip({ ...trip, collections: newCol, customCollections: newCustom ?? trip.customCollections ?? [] });
+  const mutateCol = (newCol, newCustom) =>
+    saveTrip({ ...trip, collections: newCol, customCollections: newCustom ?? trip.customCollections ?? [] });
 
-  const handleQuickImport = async () => {
+  const handleQuickAdd = async () => {
     const text = importText.trim(); if (!text) return;
     const isLink = text.startsWith('http');
     const place = { id: uid(), name: isLink ? 'Saved Place' : text, category: importCat, location: '', notes: '', link: isLink ? text : '', favorite: false };
@@ -980,13 +1210,15 @@ const CollectionsView = ({ trip, updateTrip, showToast }) => {
     showToast('Place added', 'success'); setImportText('');
   };
 
-  const handleSavePlace = async (place) => {
+  const handleSavePlace = async place => {
     const isEdit = !!editPlace; const oldCat = editPlace?.category;
     let newCol = { ...collections };
-    if (isEdit && oldCat && oldCat !== place.category) newCol[oldCat] = (newCol[oldCat] || []).filter(p => p.id !== place.id);
+    if (isEdit && oldCat && oldCat !== place.category)
+      newCol[oldCat] = (newCol[oldCat] || []).filter(p => p.id !== place.id);
     if (isEdit) {
       newCol[place.category] = (newCol[place.category] || []).map(p => p.id === place.id ? { ...p, ...place } : p);
-      if (!newCol[place.category].find(p => p.id === place.id)) newCol[place.category] = [...(newCol[place.category] || []), { ...place, favorite: false }];
+      if (!newCol[place.category].find(p => p.id === place.id))
+        newCol[place.category] = [...(newCol[place.category] || []), { ...place, favorite: false }];
     } else {
       newCol[place.category] = [...(newCol[place.category] || []), { ...place, favorite: false }];
     }
@@ -997,22 +1229,25 @@ const CollectionsView = ({ trip, updateTrip, showToast }) => {
 
   const handleDeletePlace = async (placeId, category) => {
     await mutateCol({ ...collections, [category]: (collections[category] || []).filter(p => p.id !== placeId) });
-    showToast('Place removed', 'success'); setConfirmDelete(null);
+    showToast('Place removed', 'success');
   };
 
   const handleToggleFav = async (placeId, category) => {
     await mutateCol({ ...collections, [category]: (collections[category] || []).map(p => p.id === placeId ? { ...p, favorite: !p.favorite } : p) });
   };
 
-  const handleDeleteCustomCol = async (colId) => {
+  const handleDeleteCustomCol = async colId => {
     const newCustom = customCollections.filter(c => c.id !== colId);
     const newCol = { ...collections }; delete newCol[colId];
     await mutateCol(newCol, newCustom);
-    showToast('Collection deleted', 'success'); setConfirmDeleteCol(null);
+    showToast('Collection deleted', 'success');
   };
 
-  const favorites = allColTypes.flatMap(ct => (collections[ct.value] || []).filter(p => p.favorite).map(p => ({ ...p, collectionName: ct.label, collectionIcon: ct.icon })));
-  const openAdd = (cat) => { setDefaultCat(cat); setEditPlace(null); setShowPlaceForm(true); };
+  const favorites = allColTypes.flatMap(ct =>
+    (collections[ct.value] || []).filter(p => p.favorite).map(p => ({ ...p, collectionName: ct.label, collectionIcon: ct.icon }))
+  );
+
+  const openAdd = cat => { setDefaultCat(cat); setEditPlace(null); setShowPlaceForm(true); };
 
   const PlaceCard = ({ place, showColLabel = false }) => (
     <div className="card place-card">
@@ -1028,10 +1263,16 @@ const CollectionsView = ({ trip, updateTrip, showToast }) => {
       {place.location && <div className="place-card-loc">📍 {place.location}</div>}
       {place.notes    && <div className="place-card-notes">{place.notes}</div>}
       <div className="place-card-footer">
-        {place.link ? <a href={place.link} target="_blank" rel="noopener noreferrer" className="event-link"><Icon name="link" size={11} /> Open link</a> : <span />}
+        {place.link
+          ? <a href={place.link} target="_blank" rel="noopener noreferrer" className="event-link"><Icon name="link" size={11} /> Open link</a>
+          : <span />}
         <div style={{ display: 'flex', gap: 4 }}>
-          <button className="btn-icon" onClick={() => { setEditPlace(place); setDefaultCat(place.category); setShowPlaceForm(true); }}><Icon name="edit" size={13} /></button>
-          <button className="btn-icon" onClick={() => setConfirmDelete({ id: place.id, category: place.category })}><Icon name="trash" size={13} /></button>
+          <button className="btn-icon" onClick={() => { setEditPlace(place); setDefaultCat(place.category); setShowPlaceForm(true); }}>
+            <Icon name="edit" size={13} />
+          </button>
+          <button className="btn-icon" onClick={() => setConfirmDeletePlace({ id: place.id, category: place.category })}>
+            <Icon name="trash" size={13} />
+          </button>
         </div>
       </div>
     </div>
@@ -1042,41 +1283,64 @@ const CollectionsView = ({ trip, updateTrip, showToast }) => {
       <div className="import-box">
         <div className="import-box-title">⚡ Quick Add — paste a place name or Google Maps link</div>
         <div className="import-row">
-          <input value={importText} onChange={e => setImportText(e.target.value)} placeholder="e.g. Colosseum, Rome  or  https://maps.google.com/…" onKeyDown={e => e.key === 'Enter' && handleQuickImport()} />
-          <select value={importCat} onChange={e => setImportCat(e.target.value)} style={{ width: 140 }}>{allColTypes.map(c => <option key={c.value} value={c.value}>{c.icon} {c.label}</option>)}</select>
-          <button className="btn btn-primary" onClick={handleQuickImport} disabled={!importText.trim()}>Add</button>
+          <input
+            value={importText}
+            onChange={e => setImportText(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handleQuickAdd()}
+            placeholder="e.g. Colosseum, Rome  or  https://maps.google.com/…"
+          />
+          <select value={importCat} onChange={e => setImportCat(e.target.value)} style={{ width: 140 }}>
+            {allColTypes.map(c => <option key={c.value} value={c.value}>{c.icon} {c.label}</option>)}
+          </select>
+          <button className="btn btn-primary" onClick={handleQuickAdd} disabled={!importText.trim()}>Add</button>
         </div>
       </div>
 
       <div className="view-tabs">
         <button className={`view-tab ${colTab === 'all' ? 'active' : ''}`} onClick={() => setColTab('all')}>📌 All Collections</button>
-        <button className={`view-tab ${colTab === 'favorites' ? 'active' : ''}`} onClick={() => setColTab('favorites')}>⭐ Favorites {favorites.length > 0 && <span style={{ fontSize: 11, marginLeft: 4, opacity: 0.7 }}>({favorites.length})</span>}</button>
+        <button className={`view-tab ${colTab === 'favorites' ? 'active' : ''}`} onClick={() => setColTab('favorites')}>
+          ⭐ Favorites {favorites.length > 0 && <span style={{ fontSize: 11, marginLeft: 4, opacity: 0.7 }}>({favorites.length})</span>}
+        </button>
       </div>
 
       {colTab === 'favorites' && (
         favorites.length === 0
-          ? <div className="empty-state"><div className="icon">⭐</div><h3>No favorites yet</h3><p>Click the star icon on any place to add it here</p></div>
+          ? <div className="empty-state"><div className="icon">⭐</div><h3>No favorites yet</h3><p>Star any place to add it here</p></div>
           : <div className="col-grid">{favorites.map(p => <PlaceCard key={p.id} place={p} showColLabel />)}</div>
       )}
 
       {colTab === 'all' && (
         <div>
           <div style={{ marginBottom: 20, display: 'flex', justifyContent: 'flex-end' }}>
-            <button className="btn btn-ghost btn-sm" onClick={() => setShowCustomColModal(true)}><Icon name="plus" size={12} /> New Custom Collection</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => setShowCustomModal(true)}>
+              <Icon name="plus" size={12} /> New Custom Collection
+            </button>
           </div>
           {allColTypes.map(ct => {
             const items = collections[ct.value] || [];
             return (
               <div key={ct.value} className="collection-section">
                 <div className="collection-section-header">
-                  <div className="collection-section-title"><span>{ct.icon}</span> {ct.label} <span style={{ fontSize: 12, color: 'var(--ink3)', fontWeight: 400 }}>({items.length})</span></div>
+                  <div className="collection-section-title">
+                    <span>{ct.icon}</span> {ct.label}
+                    <span style={{ fontSize: 12, color: 'var(--ink3)', fontWeight: 400 }}>({items.length})</span>
+                  </div>
                   <div style={{ display: 'flex', gap: 8 }}>
-                    <button className="btn btn-ghost btn-sm" onClick={() => openAdd(ct.value)}><Icon name="plus" size={12} /> Add</button>
-                    {ct.isCustom && <button className="btn-icon" onClick={() => setConfirmDeleteCol(ct.value)}><Icon name="trash" size={13} /></button>}
+                    <button className="btn btn-ghost btn-sm" onClick={() => openAdd(ct.value)}>
+                      <Icon name="plus" size={12} /> Add
+                    </button>
+                    {ct.isCustom && (
+                      <button className="btn-icon" onClick={() => setConfirmDeleteCol(ct.value)}>
+                        <Icon name="trash" size={13} />
+                      </button>
+                    )}
                   </div>
                 </div>
                 {items.length === 0
-                  ? <div style={{ color: 'var(--ink3)', fontSize: 13, padding: '8px 0 4px' }}>No {ct.label.toLowerCase()} saved yet. <span style={{ color: 'var(--accent)', cursor: 'pointer' }} onClick={() => openAdd(ct.value)}>Add one →</span></div>
+                  ? <div style={{ color: 'var(--ink3)', fontSize: 13, padding: '8px 0 4px' }}>
+                      No {ct.label.toLowerCase()} yet.{' '}
+                      <span style={{ color: 'var(--accent)', cursor: 'pointer' }} onClick={() => openAdd(ct.value)}>Add one →</span>
+                    </div>
                   : <div className="col-grid">{items.map(p => <PlaceCard key={p.id} place={p} />)}</div>
                 }
               </div>
@@ -1085,10 +1349,40 @@ const CollectionsView = ({ trip, updateTrip, showToast }) => {
         </div>
       )}
 
-      {showPlaceForm    && <PlaceFormModal place={editPlace} defaultCategory={defaultCat} customCollections={customCollections} onSave={handleSavePlace} onClose={() => { setShowPlaceForm(false); setEditPlace(null); }} />}
-      {confirmDelete    && <ConfirmModal message="Remove this place from your collection?" onConfirm={() => handleDeletePlace(confirmDelete.id, confirmDelete.category)} onClose={() => setConfirmDelete(null)} />}
-      {confirmDeleteCol && <ConfirmModal message="Delete this custom collection and all its places?" onConfirm={() => handleDeleteCustomCol(confirmDeleteCol)} onClose={() => setConfirmDeleteCol(null)} />}
-      {showCustomColModal && <CustomCollectionModal onSave={async col => { await updateTrip({ ...trip, customCollections: [...customCollections, col] }); showToast(`Collection "${col.name}" created!`, 'success'); setShowCustomColModal(false); }} onClose={() => setShowCustomColModal(false)} />}
+      {showPlaceForm && (
+        <PlaceFormModal
+          place={editPlace}
+          defaultCategory={defaultCat}
+          customCollections={customCollections}
+          onSave={handleSavePlace}
+          onClose={() => { setShowPlaceForm(false); setEditPlace(null); }}
+        />
+      )}
+      {confirmDeletePlace && (
+        <ConfirmModal
+          message="Remove this place from your collection?"
+          confirmLabel="Remove"
+          onConfirm={() => handleDeletePlace(confirmDeletePlace.id, confirmDeletePlace.category)}
+          onClose={() => setConfirmDeletePlace(null)}
+        />
+      )}
+      {confirmDeleteCol && (
+        <ConfirmModal
+          message="Delete this custom collection and all its places? This cannot be undone."
+          onConfirm={() => handleDeleteCustomCol(confirmDeleteCol)}
+          onClose={() => setConfirmDeleteCol(null)}
+        />
+      )}
+      {showCustomModal && (
+        <CustomCollectionModal
+          onSave={async col => {
+            await saveTrip({ ...trip, customCollections: [...customCollections, col] });
+            showToast(`Collection "${col.name}" created!`, 'success');
+            setShowCustomModal(false);
+          }}
+          onClose={() => setShowCustomModal(false)}
+        />
+      )}
     </div>
   );
 };
@@ -1096,25 +1390,31 @@ const CollectionsView = ({ trip, updateTrip, showToast }) => {
 /* ─────────────────────────────────────────────
    TripView
 ───────────────────────────────────────────── */
-const TripView = ({ trip, currentUser, updateTrip, showToast, onBack }) => {
+const TripView = ({ trip, currentUser, saveTrip, showToast, onBack }) => {
   const [tab,          setTab]          = useState('itinerary');
   const [showEditTrip, setShowEditTrip] = useState(false);
   const [showShare,    setShowShare]    = useState(false);
 
   if (!trip) return null;
-  const ti       = tripTypeInfo(trip.type);
-  const isShared = !!trip._shared;
-  const isOwner  = !isShared || trip.ownerId === currentUser?.uid;
-  const memberCount = (trip.memberEmails || []).length;
+
+  const ti          = tripTypeInfo(trip.type);
+  const isShared    = !!trip._shared;
+  const isOwner     = trip.ownerId === currentUser?.uid || !isShared;
+  const memberCount = ((trip.memberEmails || []).filter(e => e !== currentUser?.email?.toLowerCase())).length;
 
   return (
     <div className="main">
       <button className="back-btn" onClick={onBack}><Icon name="back" size={14} /> All Trips</button>
+
       <div className="page-header" style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, marginBottom: 4 }}>
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
             <span className={`trip-type-badge ${ti.cls}`}>{ti.label}</span>
-            {isShared && <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--teal)', background: 'rgba(45,212,191,0.12)', padding: '2px 8px', borderRadius: 99, textTransform: 'uppercase' }}>Shared by {trip.ownerEmail}</span>}
+            {isShared && (
+              <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--teal)', background: 'rgba(45,212,191,0.12)', padding: '2px 8px', borderRadius: 99, textTransform: 'uppercase' }}>
+                Shared by {trip.ownerEmail}
+              </span>
+            )}
             {!isShared && memberCount > 0 && (
               <span style={{ fontSize: 11, color: 'var(--ink3)', display: 'flex', alignItems: 'center', gap: 4 }}>
                 <Icon name="users" size={12} /> {memberCount} collaborator{memberCount > 1 ? 's' : ''}
@@ -1122,12 +1422,24 @@ const TripView = ({ trip, currentUser, updateTrip, showToast, onBack }) => {
             )}
           </div>
           <h1 className="page-title">{trip.name}</h1>
-          {trip.startDate && <p className="page-subtitle">{formatDate(trip.startDate)} → {formatDate(trip.endDate)} · {daysBetween(trip.startDate, trip.endDate)} days</p>}
+          {trip.startDate && (
+            <p className="page-subtitle">
+              {formatDate(trip.startDate)} → {formatDate(trip.endDate)} · {daysBetween(trip.startDate, trip.endDate)} days
+            </p>
+          )}
           {trip.notes && <p style={{ marginTop: 6, fontSize: 13, color: 'var(--ink3)' }}>{trip.notes}</p>}
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
-          {!isShared && <button className="btn btn-ghost btn-sm" onClick={() => setShowShare(true)}><Icon name="share" size={13} /> Share</button>}
-          {(isOwner || !isShared) && <button className="btn btn-ghost btn-sm" onClick={() => setShowEditTrip(true)}><Icon name="edit" size={13} /> Edit Trip</button>}
+          {isOwner && !isShared && (
+            <button className="btn btn-ghost btn-sm" onClick={() => setShowShare(true)}>
+              <Icon name="share" size={13} /> Share
+            </button>
+          )}
+          {isOwner && (
+            <button className="btn btn-ghost btn-sm" onClick={() => setShowEditTrip(true)}>
+              <Icon name="edit" size={13} /> Edit Trip
+            </button>
+          )}
         </div>
       </div>
 
@@ -1136,11 +1448,24 @@ const TripView = ({ trip, currentUser, updateTrip, showToast, onBack }) => {
         <button className={`view-tab ${tab === 'collections' ? 'active' : ''}`} onClick={() => setTab('collections')}>📌 Collections</button>
       </div>
 
-      {tab === 'itinerary'   && <ItineraryView   trip={trip} updateTrip={updateTrip} showToast={showToast} />}
-      {tab === 'collections' && <CollectionsView trip={trip} updateTrip={updateTrip} showToast={showToast} />}
+      {tab === 'itinerary'   && <ItineraryView   trip={trip} saveTrip={saveTrip} showToast={showToast} />}
+      {tab === 'collections' && <CollectionsView trip={trip} saveTrip={saveTrip} showToast={showToast} />}
 
-      {showEditTrip && <TripFormModal trip={trip} onSave={async t => { await updateTrip(t); showToast('Trip updated', 'success'); setShowEditTrip(false); }} onClose={() => setShowEditTrip(false)} />}
-      {showShare    && <ShareTripModal trip={trip} currentUser={currentUser} onClose={() => setShowShare(false)} showToast={showToast} />}
+      {showEditTrip && (
+        <TripFormModal
+          trip={trip}
+          onSave={async t => { await saveTrip(t); showToast('Trip updated', 'success'); setShowEditTrip(false); }}
+          onClose={() => setShowEditTrip(false)}
+        />
+      )}
+      {showShare && (
+        <ShareTripModal
+          trip={trip}
+          currentUser={currentUser}
+          onClose={() => setShowShare(false)}
+          showToast={showToast}
+        />
+      )}
     </div>
   );
 };
@@ -1149,7 +1474,7 @@ const TripView = ({ trip, currentUser, updateTrip, showToast, onBack }) => {
    App Root
 ───────────────────────────────────────────── */
 const App = () => {
-  const [authUser,        setAuthUser]        = useState(undefined);
+  const [authUser,        setAuthUser]        = useState(undefined); // undefined = loading
   const [activeTrip,      setActiveTrip]      = useState(null);
   const [toast,           setToast]           = useState(null);
   const [showThemePicker, setShowThemePicker] = useState(false);
@@ -1158,7 +1483,7 @@ const App = () => {
   const showToast = useCallback((msg, kind = 'success') => setToast({ msg, kind }), []);
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async user => {
+    return onAuthStateChanged(auth, async user => {
       if (user) {
         await upsertProfile(user);
         setAuthUser(user);
@@ -1166,50 +1491,58 @@ const App = () => {
         setAuthUser(null);
       }
     });
-    return unsub;
   }, []);
 
-  const { ownTrips, sharedTrips, invites, loading, saving, updateTrip, deleteTrip, acceptInvite, declineInvite } =
-    useTrips(authUser?.uid, authUser?.email);
+  const { ownTrips, sharedTrips, invites, loading, saving, saveTrip, removeTrip, acceptInvite, declineInvite } =
+    useData(authUser?.uid, authUser?.email);
 
-  // Keep activeTrip in sync with live data
-  const liveActiveTrip = useMemo(() => {
+  // Keep activeTrip in sync with live Firestore data
+  const liveTrip = useMemo(() => {
     if (!activeTrip) return null;
-    return [...ownTrips, ...sharedTrips].find(t => t.id === activeTrip.id) || null;
+    return [...ownTrips, ...sharedTrips].find(t => t.id === activeTrip.id) ?? null;
   }, [activeTrip, ownTrips, sharedTrips]);
 
   const handleLogout = async () => { await signOut(auth); setActiveTrip(null); };
 
-  if (authUser === undefined) {
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
-        <nav className="nav"><div className="nav-brand">Wandr<span className="dot">.</span></div></nav>
-        <div className="loading-screen"><div className="spinner" /><div className="loading-text">Loading…</div></div>
-      </div>
-    );
-  }
+  // Initial load screen
+  if (authUser === undefined) return (
+    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
+      <nav className="nav"><div className="nav-brand">Wandr<span className="dot">.</span></div></nav>
+      <div className="loading-screen"><div className="spinner" /><div className="loading-text">Loading…</div></div>
+    </div>
+  );
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
       <nav className="nav">
-        <div className="nav-brand" onClick={() => setActiveTrip(null)}>Wandr<span className="dot">.</span></div>
-        {liveActiveTrip && (
+        <div className="nav-brand" onClick={() => setActiveTrip(null)} style={{ cursor: 'pointer' }}>
+          Wandr<span className="dot">.</span>
+        </div>
+
+        {liveTrip && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <Icon name="map" size={14} />
-            <span style={{ fontSize: 13, color: 'var(--ink2)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{liveActiveTrip.name}</span>
+            <span style={{ fontSize: 13, color: 'var(--ink2)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {liveTrip.name}
+            </span>
           </div>
         )}
+
         <div className="nav-actions">
-          {saving && <div className="saving-indicator"><div className="saving-dot" /><span>Saving…</span></div>}
-          {invites.length > 0 && !liveActiveTrip && (
+          {saving && (
+            <div className="saving-indicator">
+              <div className="saving-dot" /><span>Saving…</span>
+            </div>
+          )}
+          {invites.length > 0 && !liveTrip && (
             <div style={{ fontSize: 11, fontWeight: 600, background: 'var(--accent)', color: '#fff', borderRadius: 99, padding: '2px 8px', display: 'flex', alignItems: 'center', gap: 4 }}>
               <Icon name="bell" size={11} /> {invites.length}
             </div>
           )}
-          <button className="btn-icon" onClick={() => setShowThemePicker(true)} title="Change theme" style={{ fontSize: 15 }}>🎨</button>
+          <button className="btn-icon" onClick={() => setShowThemePicker(true)} title="Theme" style={{ fontSize: 15 }}>🎨</button>
           {authUser && (
             <>
-              {authUser.photoURL && <img className="user-avatar" src={authUser.photoURL} alt={authUser.displayName} />}
+              {authUser.photoURL && <img className="user-avatar" src={authUser.photoURL} alt="" />}
               <span className="user-name">{authUser.displayName?.split(' ')[0]}</span>
               <button className="btn-icon" onClick={handleLogout} title="Sign out"><Icon name="logout" size={14} /></button>
             </>
@@ -1221,11 +1554,11 @@ const App = () => {
         <AuthScreen />
       ) : loading ? (
         <div className="loading-screen"><div className="spinner" /><div className="loading-text">Loading your trips…</div></div>
-      ) : liveActiveTrip ? (
+      ) : liveTrip ? (
         <TripView
-          trip={liveActiveTrip}
+          trip={liveTrip}
           currentUser={authUser}
-          updateTrip={updateTrip}
+          saveTrip={saveTrip}
           showToast={showToast}
           onBack={() => setActiveTrip(null)}
         />
@@ -1235,8 +1568,8 @@ const App = () => {
           sharedTrips={sharedTrips}
           invites={invites}
           currentUser={authUser}
-          updateTrip={updateTrip}
-          deleteTrip={deleteTrip}
+          saveTrip={saveTrip}
+          removeTrip={removeTrip}
           acceptInvite={acceptInvite}
           declineInvite={declineInvite}
           onOpenTrip={setActiveTrip}
