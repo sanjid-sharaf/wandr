@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Wandr — Trip Planner</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Fraunces:ital,opsz,wght@0,9..144,300;1,9..144,300&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div id="root"></div>
+
+<!-- React -->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<!-- Firebase: expose modules on window so app.js (Babel-transformed) can use them -->
+<script type="module">
+  import * as firebaseApp        from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+  import * as firebaseAuth       from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
+  import * as firebaseFirestore  from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+
+  window.firebaseApp       = firebaseApp;
+  window.firebaseAuth      = firebaseAuth;
+  window.firebaseFirestore = firebaseFirestore;
+
+  // Signal that Firebase is ready, then load the app
+  window.dispatchEvent(new Event('firebase-ready'));
+</script>
+
+<!-- App (loaded after Firebase is ready) -->
+<script>
+  window.addEventListener('firebase-ready', () => {
+    const script = document.createElement('script');
+    script.type = 'text/babel';
+    script.src  = 'app.js';
+    document.body.appendChild(script);
+  });
+</script>
+
+</body>
+</html>
