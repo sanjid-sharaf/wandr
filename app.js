@@ -300,37 +300,46 @@ const ShareTripModal = ({ trip, currentUser, onClose, showToast }) => {
     if (members.includes(e)) { showToast('Already shared with this person', 'error'); return; }
     setSending(true);
     try {
-      // Try to find existing user by email
-      const existingUserId = await getUserIdByEmail(e);
-      
-      const inviteId = `${trip.id}_${e.replace(/[.@]/g, '_')}`;
+      // Step 1: Ensure a sharedTrips doc exists so the invitee can read it on accept.
+      // We include the owner but NOT the invitee — they get added only on acceptance.
+      const sharedRef = sharedDocRef(trip.id);
+      const sharedSnap = await getDoc(sharedRef);
+      if (!sharedSnap.exists()) {
+        // First time sharing — copy the full trip data into /sharedTrips
+        const { id, _own, _shared, ...tripData } = trip;
+        await setDoc(sharedRef, {
+          ...tripData,
+          ownerId:      currentUser.uid,
+          ownerEmail:   currentUser.email,
+          memberUids:   [currentUser.uid],   // only owner for now
+          memberEmails: trip.memberEmails || [],
+          updatedAt:    serverTimestamp(),
+        });
+      }
+
+      // Step 2: Write the invite doc
+      // Use a simple, predictable ID that the Firestore rule helper can reconstruct
+      const safeEmail = e.replace(/[@.]/g, '_');
+      const inviteId = `${trip.id}_${safeEmail}`;
       await setDoc(doc(db, 'invites', inviteId), {
-        tripId:        trip.id,
-        tripName:      trip.name,
-        ownerUid:      currentUser.uid,
-        ownerEmail:    currentUser.email,
-        ownerName:     currentUser.displayName || currentUser.email,
-        inviteeEmail:  e,
-        inviteeUid:    existingUserId || null,
-        status:        'pending',
-        createdAt:     serverTimestamp(),
+        tripId:       trip.id,
+        tripName:     trip.name,
+        ownerUid:     currentUser.uid,
+        ownerEmail:   currentUser.email,
+        ownerName:    currentUser.displayName || currentUser.email,
+        inviteeEmail: e,
+        inviteeUid:   null,   // unknown until they sign in and accept
+        status:       'pending',
+        createdAt:    serverTimestamp(),
       });
-      
+
+      // Step 3: Track the invited email on the private trip (for the Share modal list)
       const updatedEmails = [...members, e];
       setMembers(updatedEmails);
-      
-      const isShared = !!trip.ownerId;
-      const updateData = { memberEmails: updatedEmails };
-      if (existingUserId) {
-        updateData.memberUids = arrayUnion(existingUserId);
-      }
-      
-      if (isShared) {
-        await updateDoc(sharedDocRef(trip.id), updateData);
-      } else {
-        await updateDoc(tripDocRef(currentUser.uid, trip.id), updateData);
-      }
-      
+      await updateDoc(tripDocRef(currentUser.uid, trip.id), {
+        memberEmails: updatedEmails,
+      });
+
       setEmail('');
       showToast(`Invite sent to ${e}`, 'success');
     } catch (err) {
@@ -376,7 +385,7 @@ const ShareTripModal = ({ trip, currentUser, onClose, showToast }) => {
       showToast('Access removed', 'success');
     } catch (err) {
       console.error('Remove access error:', err);
-      showToast('Failed to remove access', 'error');
+      showToast('x access', 'error');
     }
   };
 
@@ -537,51 +546,31 @@ const useTrips = (userId, userEmail) => {
   }, [userId, userEmail]);
 
 
-  // Accept invite: copy trip data to /sharedTrips and add user to memberUids
   const acceptInvite = useCallback(async (invite) => {
     if (!userId || !userEmail) return;
     try {
-      // Instead of reading from owner's private trip, use the invite data
-      // We need to get the trip data from a place the user can access
-      // The owner should have already created a sharedTrips entry
-      
-      // First, check if shared trip already exists
-      const sharedTripRef = sharedDocRef(invite.tripId);
-      const sharedTripSnap = await getDoc(sharedTripRef);
-      
-      let tripData;
-      if (sharedTripSnap.exists()) {
-        tripData = sharedTripSnap.data();
-      } else {
-        // If no shared trip exists yet, we need to read from owner's private trip
-        // For this to work, the owner needs to have shared the trip first
-        showToast('Trip data not available', 'error');
-        return;
-      }
+      // The sharedTrips doc already exists (created when the invite was sent).
+      // Just add this user to memberUids and memberEmails.
+      await updateDoc(sharedDocRef(invite.tripId), {
+        memberUids:   arrayUnion(userId),
+        memberEmails: arrayUnion(userEmail),
+        updatedAt:    serverTimestamp(),
+      });
 
-      // Update shared trip with new member
-        await updateDoc(sharedDocRef(invite.tripId), {
-          memberUids: arrayUnion(userId),
-          memberEmails: arrayUnion(userEmail),
-          updatedAt: serverTimestamp(),
-        });
-
-      // Mark invite as accepted (delete it)
+      // Delete the invite — it's been consumed
       await deleteDoc(doc(db, 'invites', invite.id));
-      
-      showToast(`Joined "${invite.tripName}"`, 'success');
     } catch (err) {
       console.error('acceptInvite error', err);
       throw err;
     }
   }, [userId, userEmail]);
 
-  const declineInvite = useCallback(async (invite) => {
-    await deleteDoc(doc(db, 'invites', invite.id));
-  }, []);
+    const declineInvite = useCallback(async (invite) => {
+      await deleteDoc(doc(db, 'invites', invite.id));
+    }, []);
 
-  return { ownTrips, sharedTrips, invites, loading, saving, updateTrip, deleteTrip, acceptInvite, declineInvite };
-};
+    return { ownTrips, sharedTrips, invites, loading, saving, updateTrip, deleteTrip, acceptInvite, declineInvite };
+  };
 
 /* ─────────────────────────────────────────────
    Form Modals
