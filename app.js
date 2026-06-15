@@ -300,25 +300,18 @@ const ShareTripModal = ({ trip, currentUser, onClose, showToast }) => {
     if (members.includes(e)) { showToast('Already shared with this person', 'error'); return; }
     setSending(true);
     try {
-      // Step 1: Ensure a sharedTrips doc exists so the invitee can read it on accept.
-      // We include the owner but NOT the invitee — they get added only on acceptance.
-      const sharedRef = sharedDocRef(trip.id);
-      const sharedSnap = await getDoc(sharedRef);
-      if (!sharedSnap.exists()) {
-        // First time sharing — copy the full trip data into /sharedTrips
-        const { id, _own, _shared, ...tripData } = trip;
-        await setDoc(sharedRef, {
-          ...tripData,
-          ownerId:      currentUser.uid,
-          ownerEmail:   currentUser.email,
-          memberUids:   [currentUser.uid],   // only owner for now
-          memberEmails: trip.memberEmails || [],
-          updatedAt:    serverTimestamp(),
-        });
-      }
+      // Step 1: Create/update sharedTrips doc (merge so we don't overwrite if it exists)
+      // Owner is in memberUids; invitee is NOT added until they accept
+      const { id, _own, _shared, ...tripData } = trip;
+      await setDoc(sharedDocRef(trip.id), {
+        ...tripData,
+        ownerId:      currentUser.uid,
+        ownerEmail:   currentUser.email,
+        memberUids:   arrayUnion(currentUser.uid),   // merge-safe: won't duplicate
+        updatedAt:    serverTimestamp(),
+      }, { merge: true });
 
       // Step 2: Write the invite doc
-      // Use a simple, predictable ID that the Firestore rule helper can reconstruct
       const safeEmail = e.replace(/[@.]/g, '_');
       const inviteId = `${trip.id}_${safeEmail}`;
       await setDoc(doc(db, 'invites', inviteId), {
@@ -328,12 +321,12 @@ const ShareTripModal = ({ trip, currentUser, onClose, showToast }) => {
         ownerEmail:   currentUser.email,
         ownerName:    currentUser.displayName || currentUser.email,
         inviteeEmail: e,
-        inviteeUid:   null,   // unknown until they sign in and accept
+        inviteeUid:   null,
         status:       'pending',
         createdAt:    serverTimestamp(),
       });
 
-      // Step 3: Track the invited email on the private trip (for the Share modal list)
+      // Step 3: Track invited email on the private trip (for the Share modal list)
       const updatedEmails = [...members, e];
       setMembers(updatedEmails);
       await updateDoc(tripDocRef(currentUser.uid, trip.id), {
