@@ -319,91 +319,59 @@ const ShareTripModal = ({ trip, currentUser, onClose, showToast }) => {
   }));
 
   const handleInvite = async () => {
-  const e = email.trim().toLowerCase();
+    const e = email.trim().toLowerCase();
 
-  console.log('[Invite] Raw email input:', email);
-  console.log('[Invite] Normalized email:', e);
-
-  if (!e.includes('@')) {
-    console.warn('[Invite] Invalid email format:', e);
-    return;
-  }
-
-  if (e === currentUser.email.toLowerCase()) {
-    console.warn('[Invite] User tried to invite themselves:', e);
-    showToast("That's your own email", 'error');
-    return;
-  }
-
-  console.log('[Invite] Current members:', memberEmails);
-
-  if (memberEmails.includes(e)) {
-    console.warn('[Invite] Email already in trip:', e);
-    showToast('Already a member', 'error');
-    return;
-  }
-
-  setSending(true);
-  console.log('[Invite] Sending state set to true');
-
-  try {
-    // Look up the user by email
-    console.log('[Invite] Querying Firestore users collection...');
-
-    const q = query(
-      collection(db, 'users'),
-      where('email', '==', e)
-    );
-
-    const snap = await getDocs(q);
-
-    console.log('[Invite] Query completed. Docs found:', snap.size);
-
-    if (snap.empty) {
-      console.warn('[Invite] No user found in Firestore for:', e);
-      showToast('No Wandr account found for that email', 'error');
-      setSending(false);
+    if (!e.includes('@')) {
       return;
     }
 
-    const docData = snap.docs[0];
-    const profile = docData.data();
-
-    console.log('[Invite] Firestore user doc ID:', docData.id);
-    console.log('[Invite] Profile data:', profile);
-
-    if (!profile.uid) {
-      console.error('[Invite] Missing UID in profile:', profile);
+    if (e === currentUser.email.toLowerCase()) {
+      showToast("That's your own email", 'error');
+      return;
     }
 
-    const tripRef = tripDocRef(trip.id);
-    console.log('[Invite] Trip ID:', trip.id);
-    console.log('[Invite] Trip ref:', tripRef);
+    if (memberEmails.includes(e)) {
+      showToast('Already a member', 'error');
+      return;
+    }
 
-    const updatePayload = {
-      memberIds: arrayUnion(profile.uid),
-      memberEmails: arrayUnion(e),
-      memberNames: arrayUnion(profile.displayName || e),
-      updatedAt: serverTimestamp(),
-    };
+    setSending(true);
 
-    console.log('[Invite] Update payload:', updatePayload);
+    try {
+      // Look up the user by email
+      const q = query(
+        collection(db, 'users'),
+        where('email', '==', e)
+      );
 
-    await updateDoc(tripRef, updatePayload);
+      const snap = await getDocs(q);
 
-    console.log('[Invite] Trip updated successfully');
+      if (snap.empty) {
+        showToast('No Wandr account found for that email', 'error');
+        return;
+      }
 
-    setEmail('');
-    showToast(`${profile.displayName || e} added to trip`, 'success');
-  } catch (err) {
-    console.error('[Invite] Error:', err);
-    console.error('[Invite] Error code:', err?.code);
-    console.error('[Invite] Error message:', err?.message);
-  }
+      const docData = snap.docs[0];
+      const profile = docData.data();
 
-  console.log('[Invite] Resetting sending state');
-  setSending(false);
-};
+      const tripRef = tripDocRef(trip.id);
+
+      await updateDoc(tripRef, {
+        memberIds: arrayUnion(profile.uid),
+        memberEmails: arrayUnion(e),
+        memberNames: arrayUnion(profile.displayName || e),
+        updatedAt: serverTimestamp(),
+      });
+
+      setEmail('');
+      showToast(`${profile.displayName || e} added to trip`, 'success');
+    } catch (err) {
+      console.error('Invite error:', err);
+      showToast('Failed to add member', 'error');
+    }
+
+    setSending(false);
+  };
 
   const handleRevoke = async (member) => {
     setRevoking(member.email);
