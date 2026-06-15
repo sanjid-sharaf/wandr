@@ -50,6 +50,14 @@ const getDayLabel = (startDate, dayIndex) => {
   return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
 };
 
+// Helper to get user ID by email
+const getUserIdByEmail = async (email) => {
+  const q = query(collection(db, 'userProfiles'), where('email', '==', email.toLowerCase()));
+  const snap = await getDocs(q);
+  if (snap.empty) return null;
+  return snap.docs[0].id;
+};
+
 const TRIP_TYPES = [
   { value: 'road',     label: '🚗 Road Trip',  cls: 'type-road'     },
   { value: 'vacation', label: '🌴 Vacation',    cls: 'type-vacation' },
@@ -144,10 +152,6 @@ const saveTripDoc = async (userId, trip, isShared = false) => {
   } else {
     await setDoc(tripDocRef(userId, id), { ...data, updatedAt: serverTimestamp() }, { merge: true });
   }
-};
-
-const removeTripDoc = async (userId, tripId) => {
-  await deleteDoc(tripDocRef(userId, tripId));
 };
 
 /* ─────────────────────────────────────────────
@@ -296,7 +300,9 @@ const ShareTripModal = ({ trip, currentUser, onClose, showToast }) => {
     if (members.includes(e)) { showToast('Already shared with this person', 'error'); return; }
     setSending(true);
     try {
-      // Create invite doc — id is stable per trip+email combo
+      // Try to find existing user by email
+      const existingUserId = await getUserIdByEmail(e);
+      
       const inviteId = `${trip.id}_${e.replace(/[.@]/g, '_')}`;
       await setDoc(doc(db, 'invites', inviteId), {
         tripId:        trip.id,
@@ -305,41 +311,73 @@ const ShareTripModal = ({ trip, currentUser, onClose, showToast }) => {
         ownerEmail:    currentUser.email,
         ownerName:     currentUser.displayName || currentUser.email,
         inviteeEmail:  e,
+        inviteeUid:    existingUserId || null,
         status:        'pending',
         createdAt:     serverTimestamp(),
       });
-      // Track on the trip itself so owner can see who's invited
+      
       const updatedEmails = [...members, e];
       setMembers(updatedEmails);
-      // Update trip's memberEmails list (private trip doc)
-      const isShared = !!trip.ownerId; // shared trips have ownerId
-      if (isShared) {
-        await updateDoc(sharedDocRef(trip.id), { memberEmails: updatedEmails });
-      } else {
-        await updateDoc(tripDocRef(currentUser.uid, trip.id), { memberEmails: updatedEmails });
+      
+      const isShared = !!trip.ownerId;
+      const updateData = { memberEmails: updatedEmails };
+      if (existingUserId) {
+        updateData.memberUids = arrayUnion(existingUserId);
       }
+      
+      if (isShared) {
+        await updateDoc(sharedDocRef(trip.id), updateData);
+      } else {
+        await updateDoc(tripDocRef(currentUser.uid, trip.id), updateData);
+      }
+      
       setEmail('');
       showToast(`Invite sent to ${e}`, 'success');
     } catch (err) {
+      console.error('Share error:', err);
       showToast('Failed to send invite', 'error');
     }
     setSending(false);
   };
 
   const handleRevoke = async (memberEmail) => {
-    const inviteId = `${trip.id}_${memberEmail.replace(/[.@]/g, '_')}`;
     try {
-      await deleteDoc(doc(db, 'invites', inviteId));
+      // Query userProfiles to find uid by email
+      const memberUid = await getUserIdByEmail(memberEmail);
+      
+      if (!memberUid) {
+        showToast('Could not find user', 'error');
+        return;
+      }
+      
+      // Remove invite document
+      const inviteId = `${trip.id}_${memberEmail.replace(/[.@]/g, '_')}`;
+      const inviteDoc = doc(db, 'invites', inviteId);
+      const inviteSnap = await getDoc(inviteDoc);
+      if (inviteSnap.exists()) {
+        await deleteDoc(inviteDoc);
+      }
+      
       const updatedEmails = members.filter(m => m !== memberEmail);
       setMembers(updatedEmails);
+      
       const isShared = !!trip.ownerId;
       if (isShared) {
-        await updateDoc(sharedDocRef(trip.id), { memberEmails: updatedEmails, memberUids: arrayRemove(memberEmail) });
+        await updateDoc(sharedDocRef(trip.id), { 
+          memberEmails: updatedEmails, 
+          memberUids: arrayRemove(memberUid)
+        });
       } else {
-        await updateDoc(tripDocRef(currentUser.uid, trip.id), { memberEmails: updatedEmails, memberUids: arrayRemove(memberEmail) });
+        await updateDoc(tripDocRef(currentUser.uid, trip.id), { 
+          memberEmails: updatedEmails, 
+          memberUids: arrayRemove(memberUid)
+        });
       }
       showToast('Access removed', 'success');
-    } catch { showToast('Failed to remove access', 'error'); }
+    } catch (err) {
+      console.error('Remove access error:', err);
+      showToast('Failed to remove access', 'error');
+    }
   };
 
   return (
@@ -487,9 +525,13 @@ const useTrips = (userId, userEmail) => {
   const deleteTrip = useCallback(async (trip) => {
     if (!userId) return;
     if (trip._shared) {
-      // Remove self from memberUids on shared trip
-      await updateDoc(sharedDocRef(trip.id), { memberUids: arrayRemove(userId), memberEmails: arrayRemove(userEmail) });
+      // User is leaving a shared trip, not deleting it
+      await updateDoc(sharedDocRef(trip.id), { 
+        memberUids: arrayRemove(userId), 
+        memberEmails: arrayRemove(userEmail)
+      });
     } else {
+      // User owns this trip completely
       await deleteDoc(tripDocRef(userId, trip.id));
     }
   }, [userId, userEmail]);
@@ -694,6 +736,7 @@ const Dashboard = ({ ownTrips, sharedTrips, invites, currentUser, updateTrip, de
     const placeCount = Object.values(trip.collections || {}).reduce((s, a) => s + a.length, 0);
     const isShared = !!trip._shared;
     const memberCount = (trip.memberEmails || []).length;
+    const isOwner = !isShared || trip.ownerId === currentUser?.uid;
     return (
       <div key={trip.id} className="card trip-card" onClick={() => onOpenTrip(trip)}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
@@ -1134,7 +1177,7 @@ const App = () => {
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async user => {
       if (user) {
-        await upsertProfile(user); // register in userProfiles on every login
+        await upsertProfile(user);
         setAuthUser(user);
       } else {
         setAuthUser(null);
