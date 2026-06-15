@@ -560,15 +560,11 @@ const useTrips = (userId, userEmail) => {
       }
 
       // Update shared trip with new member
-      await setDoc(sharedDocRef(invite.tripId), {
-        ...tripData,
-        id:           invite.tripId,
-        ownerId:      invite.ownerUid,
-        ownerEmail:   invite.ownerEmail,
-        memberUids:   arrayUnion(userId),
-        memberEmails: arrayUnion(userEmail),
-        updatedAt:    serverTimestamp(),
-      }, { merge: true });
+        await updateDoc(sharedDocRef(invite.tripId), {
+          memberUids: arrayUnion(userId),
+          memberEmails: arrayUnion(userEmail),
+          updatedAt: serverTimestamp(),
+        });
 
       // Mark invite as accepted (delete it)
       await deleteDoc(doc(db, 'invites', invite.id));
