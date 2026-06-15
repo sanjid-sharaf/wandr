@@ -91,6 +91,64 @@ const PERIODS = [
 
 const catInfo      = (val) => CATEGORIES.find(c => c.value === val)  || CATEGORIES[3];
 const tripTypeInfo = (val) => TRIP_TYPES.find(t => t.value === val)  || TRIP_TYPES[3];
+/* ─────────────────────────────────────────────
+   Themes
+───────────────────────────────────────────── */
+const THEMES = [
+  { id: 'dark',   label: 'Dark',    swatch: ['#0f1117','#6c7ff2'] },
+  { id: 'light',  label: 'Light',   swatch: ['#f4f5f7','#4f63e8'] },
+  { id: 'blue',   label: 'Midnight',swatch: ['#070d1a','#38bdf8'] },
+  { id: 'red',    label: 'Crimson', swatch: ['#120a0a','#f87171'] },
+  { id: 'pink',   label: 'Rose',    swatch: ['#13080f','#f472b6'] },
+  { id: 'green',  label: 'Forest',  swatch: ['#080f0a','#4ade80'] },
+  { id: 'sunset', label: 'Sunset',  swatch: ['#110c04','#f59e0b'] },
+  { id: 'purple', label: 'Violet',  swatch: ['#0c0812','#a78bfa'] },
+  { id: 'sand',   label: 'Sand',    swatch: ['#f5f0e8','#b45309'] },
+];
+
+const useTheme = () => {
+  const [theme, setThemeState] = useState(() => localStorage.getItem('wandr_theme') || 'dark');
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('wandr_theme', theme);
+  }, [theme]);
+  return { theme, setTheme: setThemeState };
+};
+
+const ThemePicker = ({ theme, setTheme, onClose }) => (
+  <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+    <div className="modal" style={{ maxWidth: 380 }}>
+      <div className="modal-header">
+        <span className="modal-title">Choose Theme</span>
+        <button className="btn-icon" onClick={onClose}><Icon name="x" size={15} /></button>
+      </div>
+      <div className="modal-body">
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
+          {THEMES.map(t => (
+            <button
+              key={t.id}
+              onClick={() => { setTheme(t.id); onClose(); }}
+              style={{
+                display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
+                padding: '12px 8px', borderRadius: 'var(--radius-sm)',
+                border: theme === t.id ? '2px solid var(--accent)' : '2px solid var(--border)',
+                background: theme === t.id ? 'var(--accent-soft)' : 'var(--surface2)',
+                cursor: 'pointer', transition: 'var(--transition)',
+              }}
+            >
+              <div style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
+                <div style={{ width: 20, height: 20, borderRadius: 6, background: t.swatch[0], border: '1px solid rgba(255,255,255,0.08)' }} />
+                <div style={{ width: 12, height: 12, borderRadius: '50%', background: t.swatch[1] }} />
+              </div>
+              <span style={{ fontSize: 11, fontWeight: 500, color: theme === t.id ? 'var(--accent)' : 'var(--ink2)' }}>{t.label}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  </div>
+);
+
 
 /* ─────────────────────────────────────────────
    Firestore helpers
@@ -928,6 +986,8 @@ const App = () => {
   const [authUser, setAuthUser]       = useState(undefined); // undefined = loading
   const [activeTripId, setActiveTripId] = useState(null);
   const [toast, setToast]             = useState(null);
+  const [showThemePicker, setShowThemePicker] = useState(false);
+  const { theme, setTheme } = useTheme();
 
   const showToast = useCallback((msg, kind = 'success') => setToast({ msg, kind }), []);
 
@@ -982,6 +1042,7 @@ const App = () => {
               <span>Saving…</span>
             </div>
           )}
+          <button className="btn-icon" onClick={() => setShowThemePicker(true)} title="Change theme" style={{ fontSize: 15 }}>🎨</button>
           {authUser && (
             <>
               {authUser.photoURL && <img className="user-avatar" src={authUser.photoURL} alt={authUser.displayName} />}
@@ -1003,6 +1064,7 @@ const App = () => {
       )}
 
       <Toast toast={toast} setToast={setToast} />
+      {showThemePicker && <ThemePicker theme={theme} setTheme={setTheme} onClose={() => setShowThemePicker(false)} />}
     </div>
   );
 };
