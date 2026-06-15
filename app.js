@@ -536,20 +536,30 @@ const useTrips = (userId, userEmail) => {
     }
   }, [userId, userEmail]);
 
+
   // Accept invite: copy trip data to /sharedTrips and add user to memberUids
   const acceptInvite = useCallback(async (invite) => {
     if (!userId || !userEmail) return;
     try {
-      // Load owner's trip data
-      const ownerTripSnap = await getDoc(tripDocRef(invite.ownerUid, invite.tripId));
-      if (!ownerTripSnap.exists()) {
-        // Trip was deleted; clean up invite
-        await deleteDoc(doc(db, 'invites', invite.id));
+      // Instead of reading from owner's private trip, use the invite data
+      // We need to get the trip data from a place the user can access
+      // The owner should have already created a sharedTrips entry
+      
+      // First, check if shared trip already exists
+      const sharedTripRef = sharedDocRef(invite.tripId);
+      const sharedTripSnap = await getDoc(sharedTripRef);
+      
+      let tripData;
+      if (sharedTripSnap.exists()) {
+        tripData = sharedTripSnap.data();
+      } else {
+        // If no shared trip exists yet, we need to read from owner's private trip
+        // For this to work, the owner needs to have shared the trip first
+        showToast('Trip data not available', 'error');
         return;
       }
-      const tripData = ownerTripSnap.data();
 
-      // Write to sharedTrips (or update if already there)
+      // Update shared trip with new member
       await setDoc(sharedDocRef(invite.tripId), {
         ...tripData,
         id:           invite.tripId,
@@ -560,15 +570,10 @@ const useTrips = (userId, userEmail) => {
         updatedAt:    serverTimestamp(),
       }, { merge: true });
 
-      // Also update owner's private trip so they see member list
-      await updateDoc(tripDocRef(invite.ownerUid, invite.tripId), {
-        memberUids:   arrayUnion(userId),
-        memberEmails: arrayUnion(userEmail),
-        sharedTripId: invite.tripId,
-      });
-
-      // Mark invite accepted
+      // Mark invite as accepted (delete it)
       await deleteDoc(doc(db, 'invites', invite.id));
+      
+      showToast(`Joined "${invite.tripName}"`, 'success');
     } catch (err) {
       console.error('acceptInvite error', err);
       throw err;
