@@ -130,7 +130,8 @@
     // IMPORTANT FIX:
     // Use ONE Babel transform, NOT transformScriptTags()
     const transformed = Babel.transform(code, {
-      presets: ['react']
+      presets: ['react'],
+      sourceType: "module"
     }).code;
 
     const script = document.createElement('script');
