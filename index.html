@@ -122,18 +122,23 @@
 <script>
 (async function () {
   try {
-    const res = await fetch('app.js');
+    const res = await fetch('./app.js');
     if (!res.ok) throw new Error('HTTP ' + res.status + ' loading app.js');
+
     const code = await res.text();
 
-    const s = document.createElement('script');
-    s.setAttribute('type', 'text/babel');
-    s.setAttribute('data-presets', 'react');
-    s.textContent = code;
-    document.body.appendChild(s);
+    // IMPORTANT FIX:
+    // Use ONE Babel transform, NOT transformScriptTags()
+    const transformed = Babel.transform(code, {
+      presets: ['react']
+    }).code;
 
-    // Manually trigger Babel to transform the newly added script
-    Babel.transformScriptTags();
+    const script = document.createElement('script');
+    script.type = 'text/javascript';
+    script.text = transformed;
+
+    document.body.appendChild(script);
+
   } catch (err) {
     console.error(err);
     document.getElementById('root').innerHTML =
