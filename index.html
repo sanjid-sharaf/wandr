@@ -14,30 +14,37 @@
 <!-- React -->
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+<!-- Babel standalone — transforms text/babel scripts only -->
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
-<!-- Firebase: expose modules on window so app.js (Babel-transformed) can use them -->
+<!--
+  Firebase via ESM CDN.
+  IMPORTANT: type="module" so the browser (not Babel) handles the imports.
+  Babel only processes scripts with type="text/babel", so this is safe.
+-->
 <script type="module">
-  import * as firebaseApp        from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
-  import * as firebaseAuth       from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
-  import * as firebaseFirestore  from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+  import * as firebaseApp       from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+  import * as firebaseAuth      from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
+  import * as firebaseFirestore from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
 
+  // Expose on window so the Babel-compiled app.js can destructure from them
   window.firebaseApp       = firebaseApp;
   window.firebaseAuth      = firebaseAuth;
   window.firebaseFirestore = firebaseFirestore;
 
-  // Signal that Firebase is ready, then load the app
-  window.dispatchEvent(new Event('firebase-ready'));
-</script>
+  // Fetch app.js source, inject as a text/babel script so Babel transforms it
+  const res  = await fetch('app.js');
+  const code = await res.text();
 
-<!-- App (loaded after Firebase is ready) -->
-<script>
-  window.addEventListener('firebase-ready', () => {
-    const script = document.createElement('script');
-    script.type = 'text/babel';
-    script.src  = 'app.js';
-    document.body.appendChild(script);
-  });
+  const script = document.createElement('script');
+  script.type        = 'text/babel';
+  script.dataset.presets = 'react';   // tell Babel standalone to use the React preset
+  script.textContent = code;
+  document.body.appendChild(script);
+
+  // Babel standalone auto-transforms any text/babel scripts added to the DOM
+  Babel.transformScriptTags();
 </script>
 
 </body>
