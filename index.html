@@ -11,40 +11,136 @@
 <body>
 <div id="root"></div>
 
-<!-- React -->
+<!-- React 18 UMD -->
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 
-<!-- Babel standalone — transforms text/babel scripts only -->
+<!-- Firebase 10 compat UMD (no ESM, works in plain scripts) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+
+<!--
+  Bridge: expose compat SDK as the modular-style window.firebaseXxx objects
+  that app.js destructures. This lets app.js stay unchanged.
+-->
+<script>
+(function () {
+  const FV  = firebase.firestore.FieldValue;
+
+  // ── app ──────────────────────────────────────
+  window.firebaseApp = {
+    initializeApp: (cfg) => firebase.initializeApp(cfg),
+  };
+
+  // ── auth ─────────────────────────────────────
+  window.firebaseAuth = {
+    getAuth:            (app)            => app.auth(),
+    GoogleAuthProvider: firebase.auth.GoogleAuthProvider,
+    signInWithPopup:    (auth, provider) => auth.signInWithPopup(provider),
+    signOut:            (auth)           => auth.signOut(),
+    onAuthStateChanged: (auth, cb)       => auth.onAuthStateChanged(cb),
+  };
+
+  // ── firestore ────────────────────────────────
+  // We need collection() / doc() to work both as:
+  //   collection(db, 'trips')
+  //   collection(db, 'users', uid, 'trips')          ← sub-collection path
+  //   doc(db, 'trips', id)
+  //   doc(db, 'users', uid, 'trips', id)
+  // The compat SDK uses chained .collection().doc() so we rebuild that.
+
+  function getRefFromPath(db, segments) {
+    // segments alternates: col, doc, col, doc …
+    // even-length → ends at collection, odd → ends at document
+    let ref = db;
+    segments.forEach((seg, i) => {
+      ref = (i % 2 === 0) ? ref.collection(seg) : ref.doc(seg);
+    });
+    return ref;
+  }
+
+  window.firebaseFirestore = {
+    getFirestore: (app) => app.firestore(),
+
+    collection: (dbOrRef, ...pathSegments) => {
+      // Called as collection(db, 'col') or collection(db, 'col', id, 'col2')
+      return getRefFromPath(dbOrRef, pathSegments);
+    },
+
+    doc: (dbOrRef, ...pathSegments) => {
+      return getRefFromPath(dbOrRef, pathSegments);
+    },
+
+    // query(ref, constraint1, constraint2, …)
+    // constraints are functions that take a ref and return a modified ref
+    query: (ref, ...constraints) => {
+      return constraints.reduce((q, c) => c(q), ref);
+    },
+
+    // where returns a constraint function
+    where: (field, op, val) => (ref) => ref.where(field, op, val),
+
+    onSnapshot: (ref, cb) => ref.onSnapshot(cb),
+
+    setDoc: (ref, data, opts) => {
+      if (opts && opts.merge) return ref.set(data, { merge: true });
+      return ref.set(data);
+    },
+
+    deleteDoc: (ref) => ref.delete(),
+
+    getDoc: (ref) => ref.get().then(snap => {
+      // Modular getDoc returns snapshot with .exists() as bool property
+      // Compat returns snapshot with .exists as bool
+      // Normalise so app.js can call snap.exists()
+      snap.exists = typeof snap.exists === 'function' ? snap.exists : () => snap.exists;
+      return snap;
+    }),
+
+    getDocs: (ref) => ref.get(),
+
+    updateDoc: (ref, data) => ref.update(data),
+
+    serverTimestamp: () => FV.serverTimestamp(),
+    arrayUnion:      (...items) => FV.arrayUnion(...items),
+    arrayRemove:     (...items) => FV.arrayRemove(...items),
+  };
+
+  console.log('Firebase bridge ready');
+})();
+</script>
+
+<!-- Babel standalone -->
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
 <!--
-  Firebase via ESM CDN.
-  IMPORTANT: type="module" so the browser (not Babel) handles the imports.
-  Babel only processes scripts with type="text/babel", so this is safe.
+  Load and transform app.js AFTER everything above is synchronously ready.
+  We use a plain script (not module) + fetch so Babel can transform it.
+  The key: this script runs after Babel is loaded (scripts execute in order).
 -->
-<script type="module">
-  import * as firebaseApp       from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
-  import * as firebaseAuth      from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
-  import * as firebaseFirestore from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+<script>
+(async function () {
+  try {
+    const res = await fetch('app.js');
+    if (!res.ok) throw new Error('HTTP ' + res.status + ' loading app.js');
+    const code = await res.text();
 
-  // Expose on window so the Babel-compiled app.js can destructure from them
-  window.firebaseApp       = firebaseApp;
-  window.firebaseAuth      = firebaseAuth;
-  window.firebaseFirestore = firebaseFirestore;
+    const s = document.createElement('script');
+    s.setAttribute('type', 'text/babel');
+    s.setAttribute('data-presets', 'react');
+    s.textContent = code;
+    document.body.appendChild(s);
 
-  // Fetch app.js source, inject as a text/babel script so Babel transforms it
-  const res  = await fetch('app.js');
-  const code = await res.text();
-
-  const script = document.createElement('script');
-  script.type        = 'text/babel';
-  script.dataset.presets = 'react';   // tell Babel standalone to use the React preset
-  script.textContent = code;
-  document.body.appendChild(script);
-
-  // Babel standalone auto-transforms any text/babel scripts added to the DOM
-  Babel.transformScriptTags();
+    // Manually trigger Babel to transform the newly added script
+    Babel.transformScriptTags();
+  } catch (err) {
+    console.error(err);
+    document.getElementById('root').innerHTML =
+      '<p style="color:red;font-family:sans-serif;padding:2rem;font-size:14px">' +
+      '⚠️ Failed to load app: ' + err.message + '</p>';
+  }
+})();
 </script>
 
 </body>
