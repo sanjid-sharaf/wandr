@@ -1,153 +1,17 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Wandr — Trip Planner</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Fraunces:ital,opsz,wght@0,9..144,300;1,9..144,300&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css" />
-</head>
-<body>
-<div id="root"></div>
-
-<!-- React 18 UMD -->
-<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-
-<!-- Firebase 10 compat UMD (no ESM, works in plain scripts) -->
-<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
-
-<!--
-  Bridge: expose compat SDK as the modular-style window.firebaseXxx objects
-  that app.js destructures. This lets app.js stay unchanged.
--->
-<script>
-(function () {
-  const FV  = firebase.firestore.FieldValue;
-
-  // ── app ──────────────────────────────────────
-  window.firebaseApp = {
-    initializeApp: (cfg) => firebase.initializeApp(cfg),
-  };
-
-  // ── auth ─────────────────────────────────────
-  window.firebaseAuth = {
-    getAuth:            (app)            => app.auth(),
-    GoogleAuthProvider: firebase.auth.GoogleAuthProvider,
-    signInWithPopup:    (auth, provider) => auth.signInWithPopup(provider),
-    signOut:            (auth)           => auth.signOut(),
-    onAuthStateChanged: (auth, cb)       => auth.onAuthStateChanged(cb),
-  };
-
-  // ── firestore ────────────────────────────────
-  // We need collection() / doc() to work both as:
-  //   collection(db, 'trips')
-  //   collection(db, 'users', uid, 'trips')          ← sub-collection path
-  //   doc(db, 'trips', id)
-  //   doc(db, 'users', uid, 'trips', id)
-  // The compat SDK uses chained .collection().doc() so we rebuild that.
-
-  function getRefFromPath(db, segments) {
-    // segments alternates: col, doc, col, doc …
-    // even-length → ends at collection, odd → ends at document
-    let ref = db;
-    segments.forEach((seg, i) => {
-      ref = (i % 2 === 0) ? ref.collection(seg) : ref.doc(seg);
-    });
-    return ref;
-  }
-
-  window.firebaseFirestore = {
-    getFirestore: (app) => app.firestore(),
-
-    collection: (dbOrRef, ...pathSegments) => {
-      // Called as collection(db, 'col') or collection(db, 'col', id, 'col2')
-      return getRefFromPath(dbOrRef, pathSegments);
-    },
-
-    doc: (dbOrRef, ...pathSegments) => {
-      return getRefFromPath(dbOrRef, pathSegments);
-    },
-
-    // query(ref, constraint1, constraint2, …)
-    // constraints are functions that take a ref and return a modified ref
-    query: (ref, ...constraints) => {
-      return constraints.reduce((q, c) => c(q), ref);
-    },
-
-    // where returns a constraint function
-    where: (field, op, val) => (ref) => ref.where(field, op, val),
-
-    onSnapshot: (ref, cb) => ref.onSnapshot(cb),
-
-    setDoc: (ref, data, opts) => {
-      if (opts && opts.merge) return ref.set(data, { merge: true });
-      return ref.set(data);
-    },
-
-    deleteDoc: (ref) => ref.delete(),
-
-    getDoc: (ref) => ref.get().then(snap => {
-      // Modular getDoc returns snapshot with .exists() as bool property
-      // Compat returns snapshot with .exists as bool
-      // Normalise so app.js can call snap.exists()
-      snap.exists = typeof snap.exists === 'function' ? snap.exists : () => snap.exists;
-      return snap;
-    }),
-
-    getDocs: (ref) => ref.get(),
-
-    updateDoc: (ref, data) => ref.update(data),
-
-    serverTimestamp: () => FV.serverTimestamp(),
-    arrayUnion:      (...items) => FV.arrayUnion(...items),
-    arrayRemove:     (...items) => FV.arrayRemove(...items),
-  };
-
-  console.log('Firebase bridge ready');
-})();
-</script>
-
-<!-- Babel standalone -->
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-
-<!--
-  Load and transform app.js AFTER everything above is synchronously ready.
-  We use a plain script (not module) + fetch so Babel can transform it.
-  The key: this script runs after Babel is loaded (scripts execute in order).
--->
-<script>
-(async function () {
-  try {
-    const res = await fetch('./app.js');
-    if (!res.ok) throw new Error('HTTP ' + res.status + ' loading app.js');
-
-    const code = await res.text();
-
-    // IMPORTANT FIX:
-    // Use ONE Babel transform, NOT transformScriptTags()
-    const transformed = Babel.transform(code, {
-      presets: ['react'],
-      sourceType: "module"
-    }).code;
-
-    const script = document.createElement('script');
-    script.type = 'text/javascript';
-    script.text = transformed;
-
-    document.body.appendChild(script);
-
-  } catch (err) {
-    console.error(err);
-    document.getElementById('root').innerHTML =
-      '<p style="color:red;font-family:sans-serif;padding:2rem;font-size:14px">' +
-      '⚠️ Failed to load app: ' + err.message + '</p>';
-  }
-})();
-</script>
-
-</body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Wandr — Trip Planner</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Fraunces:ital,opsz,wght@0,9..144,300;1,9..144,300&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
 </html>
