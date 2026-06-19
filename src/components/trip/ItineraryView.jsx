@@ -13,10 +13,18 @@ export const ItineraryView = ({ trip, saveTrip, showToast }) => {
   const [deleting,  setDeleting]  = useState(null);
   const [defPeriod, setDefPeriod] = useState('morning');
 
-  const dayEvents = useMemo(
-    () => (trip.events || []).filter((e) => e.dayIndex === activeDay),
-    [trip.events, activeDay]
-  );
+const dayEvents = useMemo(() => {
+  return (trip.events || [])
+    .filter((e) => e.dayIndex === activeDay)
+    .sort((a, b) => {
+      // Events without startTime go to bottom
+      if (!a.startTime && !b.startTime) return 0;
+      if (!a.startTime) return 1;
+      if (!b.startTime) return -1;
+
+      return a.startTime.localeCompare(b.startTime);
+    });
+}, [trip.events, activeDay]);
 
   const byPeriod = useMemo(() => {
     const map = {};
